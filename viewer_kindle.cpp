@@ -51,7 +51,7 @@ void print_usage(std::ostream& output) {
               "       manga_kindle --library DIRECTORY [--settings FILE] [--state FILE]\n"
               "Page numbers start at 1. Interactive commands: n (next), p (previous), q (quit).\n"
               "In the library, choose a book or open Settings to change tap direction.\n"
-              "While reading, swipe down from the top edge to show the reading bar.\n";
+              "While reading, tap the top edge or swipe down from it to show the reading bar.\n";
 }
 
 std::size_t parse_page(std::string_view text) {
@@ -770,24 +770,27 @@ bool read_touch_book(manga::Reader& reader, int fd, FBInkConfig configuration, T
             }
             continue;
         }
-        if (!tap) {
-            if (header > 0 && vertical && start_y < edge * 0.75 && down >= std::max(24.0, edge / 2.0)) {
-                const auto light = manga::read_kindle_frontlight();
-                if (touchscreen.power_transition_pending()) {
-                    return false;
-                }
-                battery = manga::read_kindle_battery_percent();
-                if (touchscreen.power_transition_pending()) {
-                    return false;
-                }
-                dropdown.emplace();
-                dropdown->button = has_library ? "Library" : "Exit";
-                if (light) {
-                    dropdown->slider = manga::KindleMenuSlider{"Light", 0, manga::kindle_frontlight_max, *light};
-                }
-                dropdown->status = reading_status(battery);
-                draw_reading_dropdown(fd, configuration, reader, state, header, dropdown);
+        const bool top_tap = tap && point.y * height < edge;
+        const bool top_swipe = !tap && vertical && start_y < edge * 0.75 && down >= std::max(24.0, edge / 2.0);
+        if (header > 0 && (top_tap || top_swipe)) {
+            const auto light = manga::read_kindle_frontlight();
+            if (touchscreen.power_transition_pending()) {
+                return false;
             }
+            battery = manga::read_kindle_battery_percent();
+            if (touchscreen.power_transition_pending()) {
+                return false;
+            }
+            dropdown.emplace();
+            dropdown->button = has_library ? "Library" : "Exit";
+            if (light) {
+                dropdown->slider = manga::KindleMenuSlider{"Light", 0, manga::kindle_frontlight_max, *light};
+            }
+            dropdown->status = reading_status(battery);
+            draw_reading_dropdown(fd, configuration, reader, state, header, dropdown);
+            continue;
+        }
+        if (!tap) {
             continue;
         }
         if (turn_page(reader, (point.x < 0.5) == left_advances)) {
