@@ -19,6 +19,7 @@ struct KindleMenuSlider {
 };
 
 struct KindleReadingHeader {
+    std::string button;
     std::optional<KindleMenuSlider> slider;
     std::string status;
     std::string message;
@@ -62,7 +63,7 @@ private:
 };
 
 int reading_header_height(int width, int height) noexcept;
-bool reading_header_menu_hit(int width, int header, int x, int y) noexcept;
+bool reading_header_button_hit(int width, int header, int x, int y) noexcept;
 // Screen pixels. The track accepts taps and drags. The step buttons accept taps.
 std::optional<int> reading_header_slider_value(const KindleReadingHeader& overlay, int width, int header,
                                                int start_x, int start_y, int end_x, bool tap);

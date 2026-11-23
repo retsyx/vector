@@ -705,23 +705,9 @@ std::string reading_status(std::optional<int> battery) {
     return status + "   Battery " + (battery ? std::to_string(*battery) + '%' : "unavailable");
 }
 
-std::optional<manga::MenuAction> run_reading_menu(int fd, const FBInkConfig& configuration,
-                                                 Touchscreen& touchscreen, std::string_view archive_name,
-                                                 bool has_library) {
-    const auto state = display_state(fd, configuration);
-    const manga::KindleMenu menu(state);
-    manga::KindleMenuPage display;
-    display.title = "Reading Menu";
-    display.subtitle = archive_name;
-    display.back = "Done";
-    display.rows = {"Continue reading", has_library ? "Library" : "Exit reader"};
-    menu.draw(fd, configuration, display);
-    return wait_for_menu_action(touchscreen, state, menu, display);
-}
-
 template<typename OnDisplayed>
 bool read_touch_book(manga::Reader& reader, int fd, FBInkConfig configuration, Touchscreen& touchscreen,
-                     manga::TapDirection direction, std::string_view archive_name, bool has_library,
+                     manga::TapDirection direction, bool has_library,
                      OnDisplayed displayed) {
     if (touchscreen.power_transition_pending()) {
         return false;
@@ -779,19 +765,9 @@ bool read_touch_book(manga::Reader& reader, int fd, FBInkConfig configuration, T
                 }
                 continue;
             }
-            if (!tap || !manga::reading_header_menu_hit(width, header, end_x, static_cast<int>(point.y * height))) {
-                continue;
-            }
-
-            dropdown.reset();
-            const auto action = run_reading_menu(fd, configuration, touchscreen, archive_name, has_library);
-            if (!action || touchscreen.power_transition_pending()) {
-                return false;
-            }
-            if (action->kind == manga::MenuActionKind::row && action->row == 1) {
+            if (tap && manga::reading_header_button_hit(width, header, end_x, static_cast<int>(point.y * height))) {
                 return true;
             }
-            state = draw_page(fd, configuration, reader, false);
             continue;
         }
         if (!tap) {
@@ -805,6 +781,7 @@ bool read_touch_book(manga::Reader& reader, int fd, FBInkConfig configuration, T
                     return false;
                 }
                 dropdown.emplace();
+                dropdown->button = has_library ? "Library" : "Exit";
                 if (light) {
                     dropdown->slider = manga::KindleMenuSlider{"Light", 0, manga::kindle_frontlight_max, *light};
                 }
@@ -857,8 +834,7 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             message = "Could not open that archive";
             return true;
         }
-        return read_touch_book(*reader, fd, configuration, touchscreen, direction, archive.filename().string(),
-                               true, [&](std::size_t index) {
+        return read_touch_book(*reader, fd, configuration, touchscreen, direction, true, [&](std::size_t index) {
             if (saved && saved->archive == relative && saved->page_index == index) {
                 return;
             }
@@ -1055,8 +1031,7 @@ void run(const Options& options) {
     if (options.touch) {
         run_touch_session(framebuffer.fd, configuration, [&](Touchscreen& touchscreen) {
             return read_touch_book(*reader, framebuffer.fd, configuration, touchscreen,
-                                   manga::TapDirection::left_advances, options.archive.filename().string(),
-                                   false, [](std::size_t) {});
+                                   manga::TapDirection::left_advances, false, [](std::size_t) {});
         });
         return;
     }

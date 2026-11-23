@@ -228,7 +228,7 @@ CoverGrid cover_grid(const Layout& layout) {
 
 struct ReadingHeaderLayout {
     int scale;
-    Rect menu;
+    Rect button;
     Rect page;
     Rect status;
     Rect light;
@@ -552,7 +552,7 @@ int reading_header_height(int width, int height) noexcept {
     return width >= 160 && height >= 240 ? std::clamp(height / 5, 120, 320) : 0;
 }
 
-bool reading_header_menu_hit(int width, int header, int x, int y) noexcept {
+bool reading_header_button_hit(int width, int header, int x, int y) noexcept {
     return x >= 0 && x < width && y >= 0 && y < header / 3;
 }
 
@@ -588,7 +588,7 @@ void paint_reading_header(std::vector<std::uint8_t>& pixels, int width, int head
     const auto scale = layout.scale;
     const auto readout_scale = std::max(1, scale - 1);
     Frame frame(width, header, pixels);
-    frame.button(layout.menu, "Menu", scale + 1, false);
+    frame.button(layout.button, overlay.button, scale + 1, false);
     frame.text(layout.page, std::to_string(page) + " / " + std::to_string(page_count), scale, muted, true);
     frame.fill({layout.status.x, layout.status.y - 1, layout.status.width, 1}, border);
     frame.text(layout.status, overlay.status, readout_scale, muted, true);
