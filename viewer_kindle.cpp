@@ -52,7 +52,8 @@ void print_usage(std::ostream& output) {
               "Page numbers start at 1. Interactive commands: n (next), p (previous), q (quit).\n"
               "In the library, choose a book or open Settings to change tap direction.\n"
               "Swipe up or down over the library covers to scroll through them.\n"
-              "While reading, tap the top edge or swipe down from it to show the reading bar.\n";
+              "While reading, tap the top edge or swipe down from it to show the reading bar.\n"
+              "Swipe up from the bottom edge to scrub through the pages.\n";
 }
 
 std::size_t parse_page(std::string_view text) {
@@ -264,6 +265,49 @@ void draw_reading_dropdown(int fd, const FBInkConfig& configuration, const manga
                   "Update the Kindle reading dropdown");
 }
 
+// Fits the page to the screen above the scrubber controls, outlined inside a narrow margin.
+void draw_scrubber_preview(int fd, const FBInkConfig& configuration, const FBInkState& state,
+                           const manga::Reader& reader) {
+    constexpr std::uint8_t outline = 172;
+    const auto width = static_cast<int>(state.view_width);
+    const auto height = static_cast<int>(state.view_height);
+    const auto top = height - manga::page_scrubber_height(width, height);
+    const auto gap = std::max(2, width / 48);
+    const auto area_width = width - 2 * gap;
+    const auto area_height = top - 2 * gap;
+    const auto& image = reader.image();
+    const auto page = compose_page(image, area_width, area_height, area_height);
+    const auto fitted = manga::fit_page(image.width, image.height, area_width, area_height);
+
+    // Copy the page without the white bars that center it in the area, and outline it.
+    const auto stride = static_cast<std::size_t>(width);
+    std::vector<std::uint8_t> frame(stride * static_cast<std::size_t>(top), 255);
+    for (int row = -1; row <= fitted.height; ++row) {
+        auto* output = frame.data() + static_cast<std::size_t>(gap + fitted.y + row) * stride + gap + fitted.x;
+        if (row < 0 || row == fitted.height) {
+            std::fill_n(output - 1, fitted.width + 2, outline);
+        } else {
+            const auto* input = page.data() + static_cast<std::size_t>(fitted.y + row) * area_width + fitted.x;
+            output[-1] = output[fitted.width] = outline;
+            std::copy_n(input, fitted.width, output);
+        }
+    }
+    require_fbink(fbink_print_raw_data(fd, frame.data(), width, top, frame.size(), 0, 0, &configuration),
+                  "Draw the Kindle page preview");
+}
+
+void draw_scrubber_controls(int fd, const FBInkConfig& configuration, const FBInkState& state,
+                            const manga::KindlePageScrubber& scrubber) {
+    const auto width = static_cast<int>(state.view_width);
+    const auto height = static_cast<int>(state.view_height);
+    const auto panel = manga::page_scrubber_height(width, height);
+    std::vector<std::uint8_t> frame(static_cast<std::size_t>(width) * static_cast<std::size_t>(panel), 255);
+    manga::paint_page_scrubber(frame, width, panel, scrubber);
+    require_fbink(fbink_print_raw_data(fd, frame.data(), width, panel, frame.size(), 0,
+                                       static_cast<short>(height - panel), &configuration),
+                  "Draw the Kindle page scrubber");
+}
+
 struct Point {
     double x;
     double y;
@@ -275,6 +319,12 @@ struct Gesture {
     bool moved = false;
 
     bool is_tap() const { return !moved; }
+};
+
+// A contact that is still down, or the completed gesture once it lifts.
+struct Touch {
+    Gesture gesture;
+    bool lifted;
 };
 
 bool read_axis(int fd, unsigned axis, input_absinfo& info) {
@@ -388,8 +438,20 @@ public:
     }
 
     std::optional<Gesture> wait_for_gesture() {
+        while (const auto touch = wait_for_touch()) {
+            if (touch->lifted) {
+                return touch->gesture;
+            }
+        }
+        return std::nullopt;
+    }
+
+    // Reports a contact that is still down once the queued input is read, so a slow
+    // caller sees the latest position. Reports a lifted contact as soon as it is read.
+    std::optional<Touch> wait_for_touch() {
         constexpr int idle_timeout_ms = 10 * 60 * 1000;
-        while (wait_for_events(events_.size(), idle_timeout_ms)) {
+        std::optional<Touch> latest;
+        while (wait_for_events(events_.size(), latest ? 0 : idle_timeout_ms)) {
             if (stop_for_system_event()) {
                 return std::nullopt;
             }
@@ -415,17 +477,17 @@ public:
                 close_for_power_press();
                 return std::nullopt;
             }
-            std::optional<Gesture> gesture;
+            std::optional<Touch> lifted;
             for (auto event = batch.begin(); event != end; ++event) {
-                if (auto completed = consume(*event); completed && !gesture) {
-                    gesture = completed;
+                if (auto report = consume(*event); report && !lifted) {
+                    (report->lifted ? lifted : latest) = report;
                 }
             }
-            if (gesture) {
-                return gesture;
+            if (lifted) {
+                return lifted;
             }
         }
-        return std::nullopt;
+        return latest;
     }
 
 private:
@@ -521,7 +583,7 @@ private:
         }
     }
 
-    std::optional<Gesture> report_contact() {
+    std::optional<Touch> report_contact() {
         constexpr double tap_slop = 0.02;
         if (active_ || released_) {
             const Point point{normalize_axis(x_, axis_x_), normalize_axis(y_, axis_y_)};
@@ -534,14 +596,20 @@ private:
             }
         }
         if (!released_) {
-            return std::nullopt;
+            if (!gesture_ || blocked_) {
+                return std::nullopt;
+            }
+            return Touch{*gesture_, false};
         }
         released_ = false;
         auto completed = std::exchange(gesture_, std::nullopt);
-        return blocked_ ? std::nullopt : completed;
+        if (!completed || blocked_) {
+            return std::nullopt;
+        }
+        return Touch{*completed, true};
     }
 
-    std::optional<Gesture> consume(const input_event& event) {
+    std::optional<Touch> consume(const input_event& event) {
         if (event.type == EV_SYN && event.code == SYN_DROPPED) {
             active_ = released_ = false;
             gesture_.reset();
@@ -699,6 +767,71 @@ std::string reading_status(std::optional<int> battery) {
     return status + "   Battery " + (battery ? std::to_string(*battery) + '%' : "unavailable");
 }
 
+bool open_page(manga::Reader& reader, std::size_t page) {
+    try {
+        reader.go_to(page);
+    } catch (const std::runtime_error& error) {
+        std::cerr << "Cannot open page " << page + 1 << ": " << error.what() << '\n';
+    }
+    return reader.page_index() == page;
+}
+
+// Previews pages above a scrubber until a page is chosen or the scrubber is cancelled,
+// which returns to the starting page. The reader follows the preview. Returns false when
+// a system event or the idle timeout ends the session.
+bool scrub_pages(manga::Reader& reader, int fd, const FBInkConfig& configuration, Touchscreen& touchscreen,
+                 const FBInkState& state, bool left_advances) {
+    const auto width = static_cast<int>(state.view_width);
+    const auto height = static_cast<int>(state.view_height);
+    const auto edge = std::clamp(height / 15, 40, 108);
+    const auto original = reader.page_index();
+    manga::KindlePageScrubber scrubber{original, reader.page_count(), left_advances, {}};
+    draw_scrubber_preview(fd, configuration, state, reader);
+    draw_scrubber_controls(fd, configuration, state, scrubber);
+    while (const auto touch = touchscreen.wait_for_touch()) {
+        if (touchscreen.power_transition_pending()) {
+            return false;
+        }
+        const auto gesture = screen_gesture(touch->gesture, state);
+        const bool tap = touch->lifted && gesture.is_tap();
+        const auto action = manga::page_scrubber_action(
+            scrubber, width, height, std::min(static_cast<int>(gesture.start.x * width), width - 1),
+            std::min(static_cast<int>(gesture.start.y * height), height - 1),
+            std::min(static_cast<int>(gesture.end.x * width), width - 1), tap);
+        switch (action.kind) {
+        case manga::ScrubberActionKind::select:
+            if (action.page != scrubber.page) {
+                // Move the knob first so it keeps up while the page decodes.
+                scrubber.page = action.page;
+                scrubber.message.clear();
+                draw_scrubber_controls(fd, configuration, state, scrubber);
+                const bool opened = open_page(reader, scrubber.page);
+                if (touchscreen.power_transition_pending()) {
+                    return false;
+                }
+                if (opened) {
+                    draw_scrubber_preview(fd, configuration, state, reader);
+                } else {
+                    scrubber.message = "Could not load page " + std::to_string(scrubber.page + 1);
+                    scrubber.page = reader.page_index();
+                    draw_scrubber_controls(fd, configuration, state, scrubber);
+                }
+            }
+            continue;
+        case manga::ScrubberActionKind::go: return true;
+        case manga::ScrubberActionKind::cancel: open_page(reader, original); return true;
+        case manga::ScrubberActionKind::none: break;
+        }
+        const auto down = (gesture.end.y - gesture.start.y) * height;
+        const auto across = std::abs(gesture.end.x - gesture.start.x) * width;
+        if (touch->lifted && !tap && down > across && down >= std::max(24.0, edge / 2.0)) {
+            open_page(reader, original);
+            return true;
+        }
+    }
+    return false;
+}
+
 template<typename OnDisplayed>
 bool read_touch_book(manga::Reader& reader, int fd, FBInkConfig configuration, Touchscreen& touchscreen,
                      manga::TapDirection direction, bool has_library,
@@ -782,6 +915,17 @@ bool read_touch_book(manga::Reader& reader, int fd, FBInkConfig configuration, T
             }
             dropdown->status = reading_status(battery);
             draw_reading_dropdown(fd, configuration, reader, state, header, dropdown);
+            continue;
+        }
+        const bool bottom_swipe = !tap && vertical && start_y > height - edge * 0.75 &&
+                                  -down >= std::max(24.0, edge / 2.0);
+        if (bottom_swipe && manga::page_scrubber_height(width, height) > 0) {
+            if (!scrub_pages(reader, fd, configuration, touchscreen, state, left_advances) ||
+                touchscreen.power_transition_pending()) {
+                return false;
+            }
+            state = draw_page(fd, configuration, reader, false);
+            displayed(reader.page_index());
             continue;
         }
         if (!tap) {

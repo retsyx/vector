@@ -266,6 +266,62 @@ ReadingHeaderLayout layout_reading_header(int width, int header) {
     };
 }
 
+struct ScrubberLayout {
+    int scale;
+    Rect cancel;
+    Rect page;
+    Rect go;
+    Rect message;
+    Rect left;
+    Rect track;
+    Rect right;
+    int track_left;
+    int track_right;
+};
+
+ScrubberLayout layout_page_scrubber(int width, int panel) {
+    const int margin = std::max(8, width / 24);
+    const int row = panel / 3;
+    const int scale = std::clamp(row / 24, 1, 5);
+    const int content_width = width - 2 * margin;
+    const int button_width = std::min(content_width / 3, 8 * scale * glyph_side);
+    const int half_row = row / 2;
+    const int track_y = row + half_row;
+    const int track_height = panel - track_y;
+    const int step_width = std::min(track_height, content_width / 4);
+    const int track_width = content_width - 2 * step_width;
+    const int inset = std::min(6 * scale, track_width / 4);
+    return {
+        scale,
+        {margin, 0, button_width, row},
+        {margin + button_width, 0, content_width - 2 * button_width, row},
+        {width - margin - button_width, 0, button_width, row},
+        {margin, row, content_width, half_row},
+        {margin, track_y, step_width, track_height},
+        {margin + step_width, track_y, track_width, track_height},
+        {width - margin - step_width, track_y, step_width, track_height},
+        margin + step_width + inset,
+        width - margin - step_width - 1 - inset,
+    };
+}
+
+// The first page sits at the end of the track opposite the side that advances.
+int scrubber_position(const ScrubberLayout& layout, const KindlePageScrubber& scrubber) {
+    const auto last = std::uint64_t{scrubber.page_count - 1};
+    const auto travel = std::uint64_t(layout.track_right - layout.track_left);
+    const auto page = std::min(std::uint64_t{scrubber.page}, last);
+    const auto steps = scrubber.left_advances ? last - page : page;
+    return layout.track_left + (last == 0 ? 0 : static_cast<int>((steps * travel + last / 2) / last));
+}
+
+std::size_t scrubber_page(const ScrubberLayout& layout, const KindlePageScrubber& scrubber, int x) {
+    const auto last = std::uint64_t{scrubber.page_count - 1};
+    const auto travel = std::uint64_t(layout.track_right - layout.track_left);
+    const auto offset = std::uint64_t(std::clamp(x, layout.track_left, layout.track_right) - layout.track_left);
+    const auto steps = travel == 0 ? 0 : (offset * last + travel / 2) / travel;
+    return static_cast<std::size_t>(scrubber.left_advances ? last - steps : steps);
+}
+
 int dimension(std::uint32_t pixels) {
     if (pixels == 0 || pixels > static_cast<std::uint32_t>(std::numeric_limits<short>::max())) {
         throw std::runtime_error("Invalid Kindle menu viewport");
@@ -639,6 +695,85 @@ void paint_reading_header(std::vector<std::uint8_t>& pixels, int width, int head
         frame.text(layout.light, "Light unavailable", readout_scale, muted, true);
     }
     frame.fill({0, header - 1, width, 1}, border);
+}
+
+int page_scrubber_height(int width, int height) noexcept {
+    return width >= 160 && height >= 240 ? std::clamp(height / 5, 120, 320) : 0;
+}
+
+ScrubberAction page_scrubber_action(const KindlePageScrubber& scrubber, int width, int height,
+                                    int start_x, int start_y, int end_x, bool tap) {
+    const int panel = page_scrubber_height(width, height);
+    if (panel == 0 || scrubber.page_count == 0) {
+        return {};
+    }
+    const auto last = scrubber.page_count - 1;
+    const auto page = std::min(scrubber.page, last);
+    const int top = height - panel;
+    if (start_y < top) {
+        return tap ? ScrubberAction{ScrubberActionKind::go, page} : ScrubberAction{};
+    }
+    const auto layout = layout_page_scrubber(width, panel);
+    const int y = start_y - top;
+    if (layout.track.contains(start_x, y)) {
+        return {ScrubberActionKind::select, scrubber_page(layout, scrubber, end_x)};
+    }
+    if (!tap) {
+        return {};
+    }
+    if (layout.cancel.contains(start_x, y)) {
+        return {ScrubberActionKind::cancel, page};
+    }
+    if (layout.go.contains(start_x, y)) {
+        return {ScrubberActionKind::go, page};
+    }
+    const bool left = layout.left.contains(start_x, y);
+    if (!left && !layout.right.contains(start_x, y)) {
+        return {};
+    }
+    if (left == scrubber.left_advances) {
+        return {ScrubberActionKind::select, page < last ? page + 1 : page};
+    }
+    return {ScrubberActionKind::select, page > 0 ? page - 1 : page};
+}
+
+void paint_page_scrubber(std::vector<std::uint8_t>& pixels, int width, int panel,
+                         const KindlePageScrubber& scrubber) {
+    const auto layout = layout_page_scrubber(width, panel);
+    const auto scale = layout.scale;
+    Frame frame(width, panel, pixels);
+    frame.fill({0, 0, width, 1}, border);
+    const auto button = [](Rect touch) {
+        return Rect{touch.x, touch.y + touch.height / 8, touch.width, touch.height * 3 / 4};
+    };
+    frame.button(button(layout.cancel), "Cancel", scale + 1, false);
+    frame.button(button(layout.go), "Go", scale + 1, true);
+    if (scrubber.page_count == 0) {
+        return;
+    }
+    const auto page = std::min(scrubber.page, scrubber.page_count - 1);
+    frame.text(layout.page, std::to_string(page + 1) + " / " + std::to_string(scrubber.page_count), scale + 1,
+               ink, true);
+    frame.text(layout.message, scrubber.message, std::max(1, scale - 1), muted, true);
+
+    const auto step_padding = std::min(3 * scale, layout.left.width / 8);
+    const auto step_scale = std::max(1, std::min(scale, layout.left.width / (2 * glyph_side)));
+    frame.button(layout.left.inset(step_padding), "<", step_scale + 1, false);
+    frame.button(layout.right.inset(step_padding), ">", step_scale + 1, false);
+
+    const auto position = scrubber_position(layout, scrubber);
+    const auto travel = layout.track_right - layout.track_left;
+    const auto center_y = layout.track.y + layout.track.height / 2;
+    const auto half_knob = 4 * scale;
+    const Rect knob{position - half_knob, center_y - 5 * scale, 2 * half_knob + 1, 10 * scale};
+    frame.fill({layout.track_left, center_y - scale, travel + 1, 2 * scale}, border);
+    if (scrubber.left_advances) {
+        frame.fill({position, center_y - scale, layout.track_right - position + 1, 2 * scale}, ink);
+    } else {
+        frame.fill({layout.track_left, center_y - scale, position - layout.track_left + 1, 2 * scale}, ink);
+    }
+    frame.fill(knob, ink);
+    frame.fill(knob.inset(scale), paper);
 }
 
 }  // namespace manga

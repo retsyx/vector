@@ -25,6 +25,22 @@ struct KindleReadingHeader {
     std::string message;
 };
 
+struct KindlePageScrubber {
+    // Zero-based.
+    std::size_t page;
+    std::size_t page_count;
+    // Later pages lie toward the left, matching the side that advances the page.
+    bool left_advances;
+    std::string message;
+};
+
+enum class ScrubberActionKind { none, cancel, go, select };
+
+struct ScrubberAction {
+    ScrubberActionKind kind = ScrubberActionKind::none;
+    std::size_t page = 0;
+};
+
 struct KindleMenuPage {
     std::string title;
     std::string subtitle;
@@ -75,5 +91,15 @@ std::optional<int> reading_header_slider_value(const KindleReadingHeader& overla
                                                int start_x, int start_y, int end_x, bool tap);
 void paint_reading_header(std::vector<std::uint8_t>& pixels, int width, int header,
                           std::size_t page, std::size_t page_count, const KindleReadingHeader& overlay);
+
+// Height of the scrubber controls along the bottom edge, or 0 when the screen is too small for them.
+int page_scrubber_height(int width, int height) noexcept;
+// Screen pixels. A tap above the controls goes to the selected page. The track accepts taps and drags.
+// The arrows and buttons accept taps.
+ScrubberAction page_scrubber_action(const KindlePageScrubber& scrubber, int width, int height,
+                                    int start_x, int start_y, int end_x, bool tap);
+// Paints the controls into a buffer of width by panel pixels.
+void paint_page_scrubber(std::vector<std::uint8_t>& pixels, int width, int panel,
+                         const KindlePageScrubber& scrubber);
 
 }  // namespace manga
