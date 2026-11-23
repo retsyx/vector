@@ -28,10 +28,12 @@ struct Object {
     bool directory;
 };
 
+using DeviceFilter = bool (*)(uint16_t vendor, uint16_t product, const char* product_name);
+
 class Device {
 public:
     static void list(std::ostream& output);
-    explicit Device(std::optional<std::string> selector);
+    explicit Device(std::optional<std::string> selector, DeviceFilter filter = nullptr);
     ~Device();
 
     std::string name() const;

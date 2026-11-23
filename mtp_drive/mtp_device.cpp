@@ -168,7 +168,8 @@ void Device::list(std::ostream& output)
     }
 }
 
-Device::Device(std::optional<std::string> selector) : session_(std::make_unique<Session>())
+Device::Device(std::optional<std::string> selector, DeviceFilter filter)
+    : session_(std::make_unique<Session>())
 {
     std::optional<Address> address;
     if (selector)
@@ -176,21 +177,24 @@ Device::Device(std::optional<std::string> selector) : session_(std::make_unique<
 
     int count = 0;
     auto devices = detect(count);
-    if (!address && count > 1)
-        throw std::system_error(EINVAL, std::generic_category(),
-                                "Multiple MTP devices are connected. Run --list and select one with --device");
-
     LIBMTP_raw_device_t* selected = nullptr;
     for (int index = 0; index < count; ++index) {
         auto& candidate = devices[index];
-        if (!address || (candidate.bus_location == address->bus && candidate.devnum == address->device)) {
-            selected = &candidate;
-            break;
-        }
+        const auto& entry = candidate.device_entry;
+        if (filter && !filter(entry.vendor_id, entry.product_id, entry.product))
+            continue;
+        if (address && (candidate.bus_location != address->bus || candidate.devnum != address->device))
+            continue;
+        if (selected)
+            throw std::system_error(EINVAL, std::generic_category(), filter
+                ? "Connect exactly one matching MTP device"
+                : "Multiple MTP devices are connected. Run --list and select one with --device");
+        selected = &candidate;
     }
     if (!selected)
-        throw std::system_error(ENODEV, std::generic_category(),
-                                "Connect and unlock an MTP device in USB File Transfer mode");
+        throw std::system_error(ENODEV, std::generic_category(), filter
+            ? "Connect and unlock a matching MTP device in USB File Transfer mode"
+            : "Connect and unlock an MTP device in USB File Transfer mode");
 
     // Closing the Scribe session normally avoids resetting its USB connection.
     if (selected->device_entry.vendor_id == amazon_vendor &&
