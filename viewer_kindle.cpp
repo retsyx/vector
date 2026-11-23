@@ -51,6 +51,7 @@ void print_usage(std::ostream& output) {
               "       manga_kindle --library DIRECTORY [--settings FILE] [--state FILE]\n"
               "Page numbers start at 1. Interactive commands: n (next), p (previous), q (quit).\n"
               "In the library, choose a book or open Settings to change tap direction.\n"
+              "Swipe up or down over the library covers to scroll through them.\n"
               "While reading, tap the top edge or swipe down from it to show the reading bar.\n";
 }
 
@@ -386,15 +387,6 @@ public:
         return wait_for_events(events_.size() - 1, 0) && stop_for_system_event();
     }
 
-    std::optional<Point> wait_for_tap() {
-        while (const auto gesture = wait_for_gesture()) {
-            if (gesture->is_tap()) {
-                return gesture->end;
-            }
-        }
-        return std::nullopt;
-    }
-
     std::optional<Gesture> wait_for_gesture() {
         constexpr int idle_timeout_ms = 10 * 60 * 1000;
         while (wait_for_events(events_.size(), idle_timeout_ms)) {
@@ -685,9 +677,11 @@ void run_touch_session(int fd, const FBInkConfig& configuration, View view) {
 std::optional<manga::MenuAction> wait_for_menu_action(Touchscreen& touchscreen, const FBInkState& state,
                                                     const manga::KindleMenu& menu,
                                                     const manga::KindleMenuPage& display) {
-    while (const auto tap = touchscreen.wait_for_tap()) {
-        const auto point = screen_point(*tap, state);
-        const auto action = menu.hit(display, point.x, point.y);
+    while (const auto touch = touchscreen.wait_for_gesture()) {
+        const auto gesture = screen_gesture(*touch, state);
+        const auto action = gesture.is_tap()
+                                ? menu.hit(display, gesture.end.x, gesture.end.y)
+                                : menu.swipe(display, gesture.start.x, gesture.start.y, gesture.end.x, gesture.end.y);
         if (action.kind != manga::MenuActionKind::none) {
             return action;
         }
@@ -923,6 +917,8 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             display.bottom_left = page > 0 ? "Previous" : "";
             display.bottom_center = selecting_deletion ? "" : "Settings";
             display.bottom_right = page < last_page ? "Next" : "";
+            display.scroll_back = page > 0;
+            display.scroll_forward = page < last_page;
             const auto size = menu.thumbnail_size();
             if (size != thumbnail_size) {
                 thumbnail_size = size;
@@ -992,8 +988,10 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             view = LibraryView::picker;
             break;
         case MenuActionKind::top_right: view = LibraryView::delete_picker; break;
-        case MenuActionKind::bottom_left: --page; break;
-        case MenuActionKind::bottom_right: ++page; break;
+        case MenuActionKind::bottom_left:
+        case MenuActionKind::scroll_back: --page; break;
+        case MenuActionKind::bottom_right:
+        case MenuActionKind::scroll_forward: ++page; break;
         case MenuActionKind::bottom_center: view = LibraryView::settings; break;
         case MenuActionKind::row:
             if (view == LibraryView::delete_picker) {

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -546,6 +547,27 @@ MenuAction KindleMenu::hit(const KindleMenuPage& page, double x, double y) const
         }
     }
     return {};
+}
+
+MenuAction KindleMenu::swipe(const KindleMenuPage& page, double start_x, double start_y, double end_x,
+                             double end_y) const {
+    if (page.thumbnails.empty()) {
+        return {};
+    }
+    const auto layout = layout_for(width_, height_);
+    const double top = start_y * height_;
+    const double down = (end_y - start_y) * height_;
+    const double across = std::abs(end_x - start_x) * width_;
+    const double distance = std::abs(down);
+    // Start between the header and footer, and travel at least one row height, mostly vertically.
+    if (!(top >= layout.row_start && top < layout.footer[0].y && distance >= layout.row_height &&
+          distance > across)) {
+        return {};
+    }
+    if (down < 0) {
+        return page.scroll_forward ? MenuAction{MenuActionKind::scroll_forward} : MenuAction{};
+    }
+    return page.scroll_back ? MenuAction{MenuActionKind::scroll_back} : MenuAction{};
 }
 
 int reading_header_height(int width, int height) noexcept {

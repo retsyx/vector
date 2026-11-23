@@ -38,9 +38,14 @@ struct KindleMenuPage {
     std::string bottom_center;
     std::string bottom_right;
     std::string message;
+    // Vertical swipes over the cover grid scroll in the enabled directions.
+    bool scroll_back = false;
+    bool scroll_forward = false;
 };
 
-enum class MenuActionKind { none, back, top_right, row, bottom_left, bottom_center, bottom_right };
+enum class MenuActionKind {
+    none, back, top_right, row, bottom_left, bottom_center, bottom_right, scroll_back, scroll_forward
+};
 
 struct MenuAction {
     MenuActionKind kind = MenuActionKind::none;
@@ -56,6 +61,7 @@ public:
     std::pair<int, int> thumbnail_size() const;
     void draw(int fd, const FBInkConfig& configuration, const KindleMenuPage& page) const;
     MenuAction hit(const KindleMenuPage& page, double x, double y) const;
+    MenuAction swipe(const KindleMenuPage& page, double start_x, double start_y, double end_x, double end_y) const;
 
 private:
     int width_;
