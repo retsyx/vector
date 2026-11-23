@@ -153,13 +153,6 @@ struct Layout {
     Rect row(std::size_t index) const {
         return {margin, row_start + static_cast<int>(index) * row_height, row_width, row_height};
     }
-
-    Rect thumbnail(Rect row) const {
-        const int padding = 2 * scale;
-        const int height = row.height - 2 * padding;
-        const int width = std::min(height * 3 / 4, std::max(0, row.width - (glyph_side + 8) * scale));
-        return {row.x + padding, row.y + padding, width, width > 0 ? height : 0};
-    }
 };
 
 Layout layout_for(int width, int height) {
@@ -191,6 +184,45 @@ Layout layout_for(int width, int height) {
         {{{margin, footer_y, button_width, 3 * unit},
           {middle_x, footer_y, button_width, 3 * unit},
           {right_x, footer_y, width - margin - right_x, 3 * unit}}},
+    };
+}
+
+constexpr int cover_columns = 3;
+constexpr int cover_rows = 2;
+static_assert(KindleMenu::covers_per_page == cover_columns * cover_rows);
+
+struct CoverGrid {
+    int left;
+    int top;
+    int gap;
+    int cell_width;
+    int cell_height;
+    int cover_width;
+    int cover_height;
+
+    Rect cover(std::size_t index) const {
+        const int column = static_cast<int>(index % cover_columns);
+        const int row = static_cast<int>(index / cover_columns);
+        const int x = left + column * (cell_width + gap) + (cell_width - cover_width) / 2;
+        const int y = top + row * (cell_height + gap) + (cell_height - cover_height) / 2;
+        return {x, y, cover_width, cover_height};
+    }
+};
+
+CoverGrid cover_grid(const Layout& layout) {
+    const int height = layout.message.y - layout.row_start;
+    const int gap = std::min({6 * layout.scale, layout.row_width / 6, height / 4});
+    const int cell_width = (layout.row_width - (cover_columns - 1) * gap) / cover_columns;
+    const int cell_height = (height - (cover_rows - 1) * gap) / cover_rows;
+    const int cover_width = std::min(cell_width, cell_height * 2 / 3);
+    return {
+        layout.margin + (layout.row_width - cover_columns * cell_width - (cover_columns - 1) * gap) / 2,
+        layout.row_start + (height - cover_rows * cell_height - (cover_rows - 1) * gap) / 2,
+        gap,
+        cell_width,
+        cell_height,
+        cover_width,
+        cover_width * 3 / 2,
     };
 }
 
@@ -416,9 +448,8 @@ std::size_t KindleMenu::rows_per_page() const {
 }
 
 std::pair<int, int> KindleMenu::thumbnail_size() const {
-    const auto layout = layout_for(width_, height_);
-    const auto tile = layout.thumbnail(layout.row(0));
-    return {tile.width, tile.height};
+    const auto grid = cover_grid(layout_for(width_, height_));
+    return {grid.cover_width, grid.cover_height};
 }
 
 void KindleMenu::draw(int fd, const FBInkConfig& configuration, const KindleMenuPage& page) const {
@@ -439,30 +470,32 @@ void KindleMenu::draw(int fd, const FBInkConfig& configuration, const KindleMenu
     frame.text(layout.subtitle, page.subtitle, std::max(1, layout.scale - 1), muted);
     frame.fill(layout.divider, ink);
 
-    const auto visible_rows = std::min(page.rows.size(), layout.capacity());
-    for (std::size_t index = 0; index < visible_rows; ++index) {
-        const Rect row = layout.row(index);
-        auto text = row.inset(2 * layout.scale);
-        if (!page.thumbnails.empty()) {
-            const auto tile = layout.thumbnail(row);
-            const auto* thumbnail = index < page.thumbnails.size() ? &page.thumbnails[index] : nullptr;
-            frame.thumbnail(tile, thumbnail);
-            if (tile.width > 0) {
-                const int inset = tile.width + 4 * layout.scale;
-                text.x += inset;
-                text.width -= inset;
+    if (!page.thumbnails.empty()) {
+        const auto grid = cover_grid(layout);
+        const auto visible_covers = std::min(page.thumbnails.size(), covers_per_page);
+        for (std::size_t index = 0; index < visible_covers; ++index) {
+            const auto tile = grid.cover(index);
+            const auto& thumbnail = page.thumbnails[index];
+            if (tile.width > 0 && !thumbnail.empty()) {
+                frame.fill(tile.inset(-1), border);
             }
+            frame.thumbnail(tile, &thumbnail);
         }
-        frame.text(text, page.rows[index], layout.scale, ink);
-        frame.fill({row.x, row.y + row.height - 1, row.width, 1}, border);
-    }
-    if (!page.details.empty()) {
-        const int scale = std::max(1, layout.scale - 1);
-        const auto columns = static_cast<std::size_t>(layout.row_width / (glyph_side * scale));
-        const auto details = elide(display_text(page.details), columns * (layout.capacity() - visible_rows));
-        for (std::size_t offset = 0; offset < details.size(); offset += columns) {
-            const auto row = layout.row(visible_rows + offset / columns);
-            frame.text(row, std::string_view(details).substr(offset, columns), scale, ink);
+    } else {
+        const auto visible_rows = std::min(page.rows.size(), layout.capacity());
+        for (std::size_t index = 0; index < visible_rows; ++index) {
+            const auto row = layout.row(index);
+            frame.text(row.inset(2 * layout.scale), page.rows[index], layout.scale, ink);
+            frame.fill({row.x, row.y + row.height - 1, row.width, 1}, border);
+        }
+        if (!page.details.empty()) {
+            const int scale = std::max(1, layout.scale - 1);
+            const auto columns = static_cast<std::size_t>(layout.row_width / (glyph_side * scale));
+            const auto details = elide(display_text(page.details), columns * (layout.capacity() - visible_rows));
+            for (std::size_t offset = 0; offset < details.size(); offset += columns) {
+                const auto row = layout.row(visible_rows + offset / columns);
+                frame.text(row, std::string_view(details).substr(offset, columns), scale, ink);
+            }
         }
     }
 
@@ -494,6 +527,16 @@ MenuAction KindleMenu::hit(const KindleMenuPage& page, double x, double y) const
     }
     if (!page.bottom_right.empty() && layout.footer[2].contains(px, py)) {
         return {MenuActionKind::bottom_right};
+    }
+    if (!page.thumbnails.empty()) {
+        const auto grid = cover_grid(layout);
+        const auto visible_covers = std::min(page.thumbnails.size(), covers_per_page);
+        for (std::size_t index = 0; index < visible_covers; ++index) {
+            if (grid.cover(index).contains(px, py)) {
+                return {MenuActionKind::row, index};
+            }
+        }
+        return {};
     }
     if (py >= layout.row_start) {
         const auto index = static_cast<std::size_t>((py - layout.row_start) / layout.row_height);

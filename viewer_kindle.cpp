@@ -839,7 +839,8 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
     std::string message;
     std::pair<int, int> thumbnail_size{};
     std::map<std::filesystem::path, std::vector<std::uint8_t>> thumbnails;
-    constexpr std::size_t max_cached_thumbnails = 64;
+    constexpr auto per_page = manga::KindleMenu::covers_per_page;
+    constexpr auto max_cached_thumbnails = 3 * per_page;
 
     const auto open_book = [&](const std::filesystem::path& archive) {
         const auto relative = archive.lexically_relative(root);
@@ -913,7 +914,6 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
     while (!touchscreen.power_transition_pending()) {
         const auto state = display_state(fd, configuration);
         const manga::KindleMenu menu(state);
-        const auto per_page = menu.rows_per_page();
         const auto last_page = entries.empty() ? 0 : (entries.size() - 1) / per_page;
         page = std::min(page, last_page);
         const auto start = page * per_page;
@@ -951,7 +951,6 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             }
             for (std::size_t index = start; index < std::min(start + per_page, entries.size()); ++index) {
                 const auto& archive = entries[index].path;
-                display.rows.push_back(archive.stem().string());
                 auto thumbnail = thumbnails.find(archive);
                 if (thumbnail == thumbnails.end()) {
                     if (touchscreen.power_transition_pending()) {

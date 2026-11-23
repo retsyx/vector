@@ -30,7 +30,7 @@ struct KindleMenuPage {
     std::string back;
     std::string top_right;
     std::vector<std::string> rows;
-    // One grayscale tile per row. An empty tile draws a placeholder.
+    // Cover grid tiles in reading order. An empty tile draws a placeholder.
     std::vector<std::vector<std::uint8_t>> thumbnails;
     std::string details;
     std::string bottom_left;
@@ -48,6 +48,8 @@ struct MenuAction {
 
 class KindleMenu {
 public:
+    static constexpr std::size_t covers_per_page = 6;
+
     explicit KindleMenu(const FBInkState& state);
     std::size_t rows_per_page() const;
     std::pair<int, int> thumbnail_size() const;
