@@ -761,7 +761,7 @@ bool read_touch_book(manga::Reader& reader, int fd, FBInkConfig configuration, T
             const auto level = tap || across > std::abs(down)
                                    ? manga::reading_header_slider_value(*dropdown, width, header,
                                          std::min(static_cast<int>(gesture.start.x * width), width - 1),
-                                         static_cast<int>(start_y), end_x)
+                                         static_cast<int>(start_y), end_x, tap)
                                    : std::nullopt;
             if (level) {
                 if (*level != dropdown->slider->value) {

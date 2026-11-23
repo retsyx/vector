@@ -61,9 +61,9 @@ private:
 
 int reading_header_height(int width, int height) noexcept;
 bool reading_header_menu_hit(int width, int header, int x, int y) noexcept;
-// Screen pixels. A drag must begin on the slider row.
+// Screen pixels. The track accepts taps and drags. The step buttons accept taps.
 std::optional<int> reading_header_slider_value(const KindleReadingHeader& overlay, int width, int header,
-                                               int start_x, int start_y, int end_x);
+                                               int start_x, int start_y, int end_x, bool tap);
 void paint_reading_header(std::vector<std::uint8_t>& pixels, int width, int header,
                           std::size_t page, std::size_t page_count, const KindleReadingHeader& overlay);
 

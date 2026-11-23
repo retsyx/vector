@@ -200,7 +200,9 @@ struct ReadingHeaderLayout {
     Rect page;
     Rect status;
     Rect light;
+    Rect decrease;
     Rect slider;
+    Rect increase;
     int slider_left;
     int slider_right;
 };
@@ -213,16 +215,21 @@ ReadingHeaderLayout layout_reading_header(int width, int header) {
     const int content_width = width - 2 * margin;
     const int half_row = row / 2;
     const int slider_y = row + 2 * half_row;
-    const int inset = std::min(2 * glyph_side * scale, content_width / 4);
+    const int slider_height = header - slider_y - 1;
+    const int step_width = std::min(slider_height, content_width / 4);
+    const int slider_width = content_width - 2 * step_width;
+    const int inset = std::min(6 * scale, slider_width / 4);
     return {
         scale,
         {margin, row / 8, button_width, row * 3 / 4},
         {margin + button_width, 0, content_width - button_width, row},
         {margin, row, content_width, half_row},
         {margin, row + half_row, content_width, half_row},
-        {margin, slider_y, content_width, header - slider_y - 1},
-        margin + inset,
-        width - margin - 1 - inset,
+        {margin, slider_y, step_width, slider_height},
+        {margin + step_width, slider_y, slider_width, slider_height},
+        {width - margin - step_width, slider_y, step_width, slider_height},
+        margin + step_width + inset,
+        width - margin - step_width - 1 - inset,
     };
 }
 
@@ -507,18 +514,28 @@ bool reading_header_menu_hit(int width, int header, int x, int y) noexcept {
 }
 
 std::optional<int> reading_header_slider_value(const KindleReadingHeader& overlay, int width, int header,
-                                               int start_x, int start_y, int end_x) {
+                                               int start_x, int start_y, int end_x, bool tap) {
     if (!overlay.slider || overlay.slider->minimum >= overlay.slider->maximum || width < 160 || header < 120) {
         return std::nullopt;
     }
+    const auto& control = *overlay.slider;
     const auto layout = layout_reading_header(width, header);
+    const bool decrease = layout.decrease.contains(start_x, start_y);
+    const bool increase = layout.increase.contains(start_x, start_y);
+    if (tap && (decrease || increase)) {
+        const auto value = std::clamp(control.value, control.minimum, control.maximum);
+        if (decrease) {
+            return value > control.minimum ? value - 1 : value;
+        }
+        return value < control.maximum ? value + 1 : value;
+    }
     if (!layout.slider.contains(start_x, start_y)) {
         return std::nullopt;
     }
     const auto position = std::clamp(end_x, layout.slider_left, layout.slider_right);
     const auto travel = layout.slider_right - layout.slider_left;
-    const auto range = std::int64_t{overlay.slider->maximum} - overlay.slider->minimum;
-    const auto value = overlay.slider->minimum + ((position - layout.slider_left) * range + travel / 2) / travel;
+    const auto range = std::int64_t{control.maximum} - control.minimum;
+    const auto value = control.minimum + ((position - layout.slider_left) * range + travel / 2) / travel;
     return static_cast<int>(value);
 }
 
@@ -545,6 +562,10 @@ void paint_reading_header(std::vector<std::uint8_t>& pixels, int width, int head
         const Rect knob{position - half_knob, center_y - 5 * scale, 2 * half_knob + 1, 10 * scale};
         const auto label = control.label + "  " + std::to_string(value) + " / " + std::to_string(control.maximum);
         frame.text(layout.light, overlay.message.empty() ? label : overlay.message, readout_scale, ink, true);
+        const auto step_padding = std::min(3 * scale, layout.decrease.width / 8);
+        const auto step_scale = std::max(1, std::min(scale, layout.decrease.width / (2 * glyph_side)));
+        frame.button(layout.decrease.inset(step_padding), "-", step_scale + 1, false);
+        frame.button(layout.increase.inset(step_padding), "+", step_scale + 1, false);
         frame.fill({layout.slider_left, center_y - scale, travel + 1, 2 * scale}, border);
         frame.fill({layout.slider_left, center_y - scale, position - layout.slider_left + 1, 2 * scale}, ink);
         frame.fill(knob, ink);
