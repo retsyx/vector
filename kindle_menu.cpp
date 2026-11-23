@@ -161,7 +161,7 @@ Layout layout_for(int width, int height) {
     const int margin = std::max(unit, width / 24);
     const int content_width = width - 2 * margin;
     const int header_height = 3 * unit;
-    const int back_width = std::min(6 * unit, content_width / 3);
+    const int back_width = std::min(7 * unit, content_width / 3);
     const int title_x = margin + back_width + unit / 2;
     const int divider_y = margin + 4 * unit + unit / 2;
     const int footer_y = height - margin - 3 * unit;

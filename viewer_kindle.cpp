@@ -908,7 +908,7 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
         } else if (view == LibraryView::settings) {
             display.title = "Settings";
             display.subtitle = "Tap side that advances the page";
-            display.back = "Done";
+            display.back = "Library";
             display.rows = {direction == TapDirection::left_advances ? "[x] Left side" : "[ ] Left side",
                             direction == TapDirection::right_advances ? "[x] Right side" : "[ ] Right side"};
         } else {
@@ -918,7 +918,7 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             if (last_page > 0) {
                 display.subtitle += "  " + std::to_string(page + 1) + "/" + std::to_string(last_page + 1);
             }
-            display.back = selecting_deletion ? "Done" : "Exit";
+            display.back = selecting_deletion ? "Library" : "Exit";
             display.top_right = !selecting_deletion && !entries.empty() ? "Delete" : "";
             display.bottom_left = page > 0 ? "Previous" : "";
             display.bottom_center = selecting_deletion ? "" : "Settings";
