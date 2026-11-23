@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.16)
+project(manga_vector LANGUAGES CXX)
+
+find_package(PkgConfig REQUIRED)
+find_package(PNG 1.6 REQUIRED)
+find_package(Threads REQUIRED)
+pkg_check_modules(HEIF REQUIRED IMPORTED_TARGET libheif>=1.16)
+pkg_check_modules(ZIP REQUIRED IMPORTED_TARGET libzip)
+pkg_check_modules(TURBOJPEG REQUIRED IMPORTED_TARGET libturbojpeg>=3.0)
+
+add_library(manga_heif STATIC heif_loader.cpp)
+target_compile_features(manga_heif PUBLIC cxx_std_17)
+target_include_directories(manga_heif PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(manga_heif PRIVATE
+    PkgConfig::HEIF PkgConfig::ZIP PkgConfig::TURBOJPEG PNG::PNG Threads::Threads)
+
+add_library(manga_reader STATIC viewer.cpp)
+target_link_libraries(manga_reader PUBLIC manga_heif)
+
+option(MANGA_BUILD_DESKTOP_VIEWER "Build the SDL3 desktop viewer" OFF)
+if(MANGA_BUILD_DESKTOP_VIEWER)
+    find_package(SDL3 3.2 CONFIG REQUIRED)
+    add_executable(manga_viewer viewer_desktop.cpp)
+    target_link_libraries(manga_viewer PRIVATE manga_reader SDL3::SDL3)
+endif()
+
+option(MANGA_BUILD_KINDLE_VIEWER "Build the Linux FBInk viewer for Kindle" OFF)
+if(MANGA_BUILD_KINDLE_VIEWER)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "The Kindle viewer requires a Linux target toolchain")
+    endif()
+    find_path(FBINK_INCLUDE_DIR fbink.h)
+    find_library(FBINK_LIBRARY fbink)
+    if(NOT FBINK_INCLUDE_DIR OR NOT FBINK_LIBRARY)
+        message(FATAL_ERROR "Set FBINK_INCLUDE_DIR and FBINK_LIBRARY to the target FBInk build")
+    endif()
+    add_executable(manga_kindle viewer_kindle.cpp kindle_device.cpp kindle_power.cpp kindle_library.cpp kindle_menu.cpp)
+    # Resolve libc data symbols through the GOT when using the ARM bundle's runtime libc.
+    target_compile_options(manga_kindle PRIVATE -fPIC)
+    target_include_directories(manga_kindle SYSTEM PRIVATE ${FBINK_INCLUDE_DIR})
+    target_link_libraries(manga_kindle PRIVATE manga_reader ${FBINK_LIBRARY})
+endif()
