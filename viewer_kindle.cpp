@@ -15,6 +15,7 @@
 #include <array>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cmath>
 #include <csignal>
@@ -393,8 +394,8 @@ bool is_power_press(const input_event& event) {
 
 class Touchscreen {
 public:
-    Touchscreen(int power_listener, int signal_listener) : events_{{power_listener, POLLIN, 0},
-                                                                  {signal_listener, POLLIN, 0}} {
+    Touchscreen(manga::KindlePowerListener& power, int signal_listener)
+        : power_(power), events_{{power.fd(), POLLIN, 0}, {signal_listener, POLLIN, 0}} {
         touch_ = find_touch(false);
         if (!touch_) {
             touch_ = find_touch(true);
@@ -434,11 +435,27 @@ public:
     Touchscreen& operator=(const Touchscreen&) = delete;
 
     bool power_transition_pending() {
-        return wait_for_events(events_.size() - 1, 0) && stop_for_system_event();
+        return interruption_ != Interruption::none ||
+               (wait_for_events(events_.size() - 1, 0) && stop_for_system_event());
     }
 
-    std::optional<Gesture> wait_for_gesture() {
-        while (const auto touch = wait_for_touch()) {
+    // Whether input stopped for the power button or the Kindle screensaver, rather than to exit.
+    bool interrupted_by_sleep() const noexcept { return interruption_ == Interruption::sleep; }
+
+    // Drops touches for a while, such as while the Kindle redraws its own screen.
+    void ignore_input(std::chrono::milliseconds duration) {
+        const auto deadline = std::chrono::steady_clock::now() + duration;
+        for (;;) {
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+            if (remaining.count() <= 0 || !wait_for_gesture(static_cast<int>(remaining.count()))) {
+                return;
+            }
+        }
+    }
+
+    std::optional<Gesture> wait_for_gesture(int timeout_ms = idle_timeout_ms) {
+        while (const auto touch = wait_for_touch(timeout_ms)) {
             if (touch->lifted) {
                 return touch->gesture;
             }
@@ -448,10 +465,9 @@ public:
 
     // Reports a contact that is still down once the queued input is read, so a slow
     // caller sees the latest position. Reports a lifted contact as soon as it is read.
-    std::optional<Touch> wait_for_touch() {
-        constexpr int idle_timeout_ms = 10 * 60 * 1000;
+    std::optional<Touch> wait_for_touch(int timeout_ms = idle_timeout_ms) {
         std::optional<Touch> latest;
-        while (wait_for_events(events_.size(), latest ? 0 : idle_timeout_ms)) {
+        while (interruption_ == Interruption::none && wait_for_events(events_.size(), latest ? 0 : timeout_ms)) {
             if (stop_for_system_event()) {
                 return std::nullopt;
             }
@@ -491,6 +507,9 @@ public:
     }
 
 private:
+    enum class Interruption { none, sleep, exit };
+    static constexpr int idle_timeout_ms = 10 * 60 * 1000;
+
     FBInkInputDevice* find_touch(bool shared) {
         if (devices_.entries) {
             for (std::size_t index = 0; index < devices_.count; ++index) {
@@ -504,9 +523,15 @@ private:
         return nullptr;
     }
 
-    void close_for_power_press() {
+    bool interrupt(Interruption reason) {
         release();
-        std::cout << "Closing for Kindle power button" << std::endl;
+        interruption_ = reason;
+        return true;
+    }
+
+    void close_for_power_press() {
+        std::cout << "Pausing for Kindle power button" << std::endl;
+        interrupt(Interruption::sleep);
     }
 
     bool wait_for_events(std::size_t count, int timeout) {
@@ -522,20 +547,17 @@ private:
 
     bool stop_for_system_event() {
         if (events_[0].revents) {
-            release();
-            char event[256];
-            const auto bytes = read(events_[0].fd, event, sizeof(event));
-            if (bytes > 0) {
-                std::cout << "Closing for Kindle sleep: " << std::string_view(event, static_cast<std::size_t>(bytes))
-                          << std::endl;
-            } else {
+            if (!power_.read_events()) {
                 std::cerr << "The Kindle sleep listener closed.\n";
+                return interrupt(Interruption::exit);
             }
-            return true;
+            if (power_.slept()) {
+                std::cout << "Pausing for the Kindle screensaver" << std::endl;
+                return interrupt(Interruption::sleep);
+            }
         }
         if (events_[1].revents) {
-            release();
-            return true;
+            return interrupt(Interruption::exit);
         }
         for (std::size_t index = 2; index + 1 < events_.size(); ++index) {
             auto& descriptor = events_[index];
@@ -650,8 +672,10 @@ private:
         return std::nullopt;
     }
 
+    manga::KindlePowerListener& power_;
     InputDevices devices_;
     std::vector<pollfd> events_;
+    Interruption interruption_ = Interruption::none;
     FBInkInputDevice* touch_ = nullptr;
     bool multitouch_ = false;
     input_absinfo axis_x_{};
@@ -716,29 +740,67 @@ Gesture screen_gesture(Gesture gesture, const FBInkState& state) {
     return gesture;
 }
 
-// A normal exit may restore the original screen. Power and sleep events leave it to Kindle.
+// Waits for the Kindle to leave the screensaver that interrupted a session. Returns false when the viewer
+// should exit instead, such as when a power button press opened the power dialog rather than the screensaver.
+bool wait_for_wake(manga::KindlePowerListener& power, int signals) {
+    using namespace std::chrono;
+    const auto deadline = steady_clock::now() + 10s;
+    std::array<pollfd, 2> events{{{power.fd(), POLLIN, 0}, {signals, POLLIN, 0}}};
+    while (!power.slept() || power.asleep()) {
+        int timeout = -1;
+        if (!power.slept()) {
+            timeout = static_cast<int>(duration_cast<milliseconds>(deadline - steady_clock::now()).count());
+            if (timeout <= 0) {
+                std::cout << "The Kindle did not start its screensaver" << std::endl;
+                return false;
+            }
+        }
+        const int ready = poll(events.data(), events.size(), timeout);
+        if (ready < 0 && errno != EINTR) {
+            throw std::system_error(errno, std::generic_category(), "Wait for the Kindle to wake");
+        }
+        if (ready > 0 && (events[1].revents || (events[0].revents && !power.read_events()))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A normal exit may restore the original screen. Power and sleep events leave it to Kindle until it wakes,
+// and then the view starts again.
 template<typename View>
 void run_touch_session(int fd, const FBInkConfig& configuration, View view) {
+    using namespace std::chrono_literals;
     if ((fbink_features() & FBINK_FEATURE_INPUT) == 0) {
         throw std::runtime_error("This FBInk build has input detection disabled");
     }
 
     const StopSignals signals;
-    const manga::KindlePowerListener power;
-    Touchscreen touchscreen(power.fd(), signals.fd);
-    if (touchscreen.power_transition_pending()) {
-        return;
-    }
-    touchscreen.acquire();
-    ScreenSnapshot screen(fd, configuration);
-    if (touchscreen.power_transition_pending()) {
-        touchscreen.release();
-        return;
-    }
-    const bool closed = view(touchscreen);
-    touchscreen.release();
-    if (closed && !touchscreen.power_transition_pending()) {
-        screen.restore();
+    manga::KindlePowerListener power;
+    std::optional<ScreenSnapshot> screen;
+    for (bool woke = false;; woke = true) {
+        power.reset_sleep();
+        Touchscreen touchscreen(power, signals.fd);
+        if (!touchscreen.power_transition_pending()) {
+            touchscreen.acquire();
+            if (woke) {
+                // The Kindle redraws its own screen after the screensaver. Draw over it once that has finished.
+                touchscreen.ignore_input(1500ms);
+            }
+            if (!screen && !touchscreen.power_transition_pending()) {
+                screen.emplace(fd, configuration);
+            }
+            const bool closed = !touchscreen.power_transition_pending() && view(touchscreen);
+            touchscreen.release();
+            if (closed && !touchscreen.power_transition_pending()) {
+                screen->restore();
+                return;
+            }
+        }
+        if (!touchscreen.interrupted_by_sleep() || !wait_for_wake(power, signals.fd)) {
+            return;
+        }
+        std::cout << "Resuming after the Kindle screensaver" << std::endl;
     }
 }
 
@@ -942,7 +1004,15 @@ bool read_touch_book(manga::Reader& reader, int fd, FBInkConfig configuration, T
     return false;
 }
 
-bool browse_library(const Options& options, int fd, FBInkConfig configuration, Touchscreen& touchscreen) {
+// Library state that outlasts a session interrupted by the Kindle screensaver.
+struct LibraryState {
+    std::size_t page = 0;
+    std::pair<int, int> thumbnail_size{};
+    std::map<std::filesystem::path, std::vector<std::uint8_t>> thumbnails;
+};
+
+bool browse_library(const Options& options, int fd, FBInkConfig configuration, Touchscreen& touchscreen,
+                    LibraryState& library) {
     using manga::MenuActionKind;
     using manga::TapDirection;
 
@@ -952,13 +1022,27 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
     auto saved = manga::read_reading_position(options.state);
     enum class LibraryView { picker, settings, delete_picker };
     auto view = LibraryView::picker;
-    std::size_t page = 0;
+    auto& page = library.page;
     std::optional<std::size_t> pending_deletion;
     std::string message;
-    std::pair<int, int> thumbnail_size{};
-    std::map<std::filesystem::path, std::vector<std::uint8_t>> thumbnails;
+    auto& thumbnail_size = library.thumbnail_size;
+    auto& thumbnails = library.thumbnails;
     constexpr auto per_page = manga::KindleMenu::covers_per_page;
     constexpr auto max_cached_thumbnails = 3 * per_page;
+
+    const auto save_position = [&](manga::ReadingPosition position) {
+        if (saved && saved->archive == position.archive && saved->page_index == position.page_index &&
+            saved->reading == position.reading) {
+            return;
+        }
+        try {
+            manga::write_reading_position(options.state, position);
+            saved = std::move(position);
+        } catch (const std::exception& error) {
+            std::cerr << error.what() << '\n';
+            message = "Could not save reading position";
+        }
+    };
 
     const auto open_book = [&](const std::filesystem::path& archive) {
         const auto relative = archive.lexically_relative(root);
@@ -976,17 +1060,7 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             return true;
         }
         return read_touch_book(*reader, fd, configuration, touchscreen, direction, true, [&](std::size_t index) {
-            if (saved && saved->archive == relative && saved->page_index == index) {
-                return;
-            }
-            manga::ReadingPosition position{relative, index};
-            try {
-                manga::write_reading_position(options.state, position);
-                saved = std::move(position);
-            } catch (const std::exception& error) {
-                std::cerr << error.what() << '\n';
-                message = "Could not save reading position";
-            }
+            save_position({relative, index, true});
         });
     };
 
@@ -1015,7 +1089,7 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
         }
     };
 
-    if (saved && !touchscreen.power_transition_pending()) {
+    if (saved && saved->reading && !touchscreen.power_transition_pending()) {
         const auto match = std::find_if(entries.begin(), entries.end(), [&](const manga::LibraryEntry& entry) {
             return entry.path.lexically_relative(root) == saved->archive;
         });
@@ -1029,6 +1103,10 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
     }
 
     while (!touchscreen.power_transition_pending()) {
+        if (saved && saved->reading) {
+            // Reopen the library rather than the archive after the screensaver or the next launch.
+            save_position({saved->archive, saved->page_index, false});
+        }
         const auto state = display_state(fd, configuration);
         const manga::KindleMenu menu(state);
         const auto last_page = entries.empty() ? 0 : (entries.size() - 1) / per_page;
@@ -1168,8 +1246,9 @@ void run(const Options& options) {
     require_fbink(framebuffer.fd, "Open the Kindle framebuffer");
     require_fbink(fbink_init(framebuffer.fd, &configuration), "Initialize the Kindle framebuffer");
     if (!options.library.empty()) {
+        LibraryState library;
         run_touch_session(framebuffer.fd, configuration, [&](Touchscreen& touchscreen) {
-            return browse_library(options, framebuffer.fd, configuration, touchscreen);
+            return browse_library(options, framebuffer.fd, configuration, touchscreen, library);
         });
         return;
     }

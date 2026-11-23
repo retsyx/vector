@@ -19,7 +19,11 @@
 namespace manga {
 namespace {
 
-constexpr std::string_view position_header = "MANGA-VIEWER-1\n";
+constexpr std::string_view position_header = "MANGA-VIEWER-2\n";
+// Version 1 records predate the saved view and always reopened the archive.
+constexpr std::string_view reading_position_header = "MANGA-VIEWER-1\n";
+constexpr std::string_view reading_view = "reading\n";
+constexpr std::string_view library_view = "library\n";
 constexpr std::size_t position_record_limit = 16 * 1024;
 
 class DirectoryHandle {
@@ -101,6 +105,14 @@ void write_atomic(const std::filesystem::path& path, std::string_view value) {
         unlink(temporary.c_str());
         throw std::system_error(error, std::generic_category(), "Save " + destination);
     }
+}
+
+bool consume_prefix(std::string_view& record, std::string_view prefix) {
+    if (record.substr(0, prefix.size()) != prefix) {
+        return false;
+    }
+    record.remove_prefix(prefix.size());
+    return true;
 }
 
 std::optional<std::size_t> consume_number(std::string_view& record) {
@@ -210,10 +222,18 @@ std::optional<ReadingPosition> read_reading_position(const std::filesystem::path
         std::array<char, position_record_limit> bytes{};
         input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
         std::string_view record(bytes.data(), static_cast<std::size_t>(input.gcount()));
-        if (!input.eof() || input.bad() || record.substr(0, position_header.size()) != position_header) {
+        if (!input.eof() || input.bad()) {
             return std::nullopt;
         }
-        record.remove_prefix(position_header.size());
+        bool reading = true;
+        if (consume_prefix(record, position_header)) {
+            reading = consume_prefix(record, reading_view);
+            if (!reading && !consume_prefix(record, library_view)) {
+                return std::nullopt;
+            }
+        } else if (!consume_prefix(record, reading_position_header)) {
+            return std::nullopt;
+        }
 
         const auto page = consume_number(record);
         const auto path_size = consume_number(record);
@@ -221,7 +241,7 @@ std::optional<ReadingPosition> read_reading_position(const std::filesystem::path
             record.find('\0') != std::string_view::npos) {
             return std::nullopt;
         }
-        return ReadingPosition{std::filesystem::path(record), *page};
+        return ReadingPosition{std::filesystem::path(record), *page, reading};
     } catch (...) {
         return std::nullopt;
     }
@@ -230,8 +250,8 @@ std::optional<ReadingPosition> read_reading_position(const std::filesystem::path
 void write_reading_position(const std::filesystem::path& state, const ReadingPosition& position) {
     const auto& archive = position.archive.native();
     // Keeping the path as a length-prefixed byte sequence preserves spaces and line breaks.
-    auto record = std::string(position_header) + std::to_string(position.page_index) + '\n' +
-                  std::to_string(archive.size()) + '\n';
+    auto record = std::string(position_header) + std::string(position.reading ? reading_view : library_view) +
+                  std::to_string(position.page_index) + '\n' + std::to_string(archive.size()) + '\n';
     if (archive.empty() || archive.find('\0') != std::string::npos ||
         archive.size() >= position_record_limit - record.size()) {
         throw std::invalid_argument("Invalid archive path for the saved position");

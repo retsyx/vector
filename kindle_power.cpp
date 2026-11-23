@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -109,11 +110,12 @@ KindlePowerListener::KindlePowerListener() {
     }
 
     char program[] = "lipc-wait-event";
+    char repeat[] = "-m";
     char option[] = "-s";
     char interval[] = "0";
     char service[] = "com.lab126.powerd";
-    char events[] = "goingToScreenSaver,readyToSuspend";
-    char* arguments[] = {program, option, interval, service, events, nullptr};
+    char events[] = "goingToScreenSaver,readyToSuspend,outOfScreenSaver";
+    char* arguments[] = {program, repeat, option, interval, service, events, nullptr};
 
     error = posix_spawn_file_actions_addclose(&actions, reader);
     if (error == 0) {
@@ -131,6 +133,34 @@ KindlePowerListener::KindlePowerListener() {
     }
 
     fd_ = std::exchange(pipe.descriptors[0], -1);
+}
+
+bool KindlePowerListener::read_events() {
+    char bytes[256];
+    for (;;) {
+        const auto size = read(fd_, bytes, sizeof(bytes));
+        if (size < 0 && errno == EINTR) {
+            continue;
+        }
+        if (size < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return true;
+        }
+        if (size <= 0) {
+            return false;
+        }
+        pending_.append(bytes, static_cast<std::size_t>(size));
+        // Each event is reported on its own line, starting with the event name.
+        for (auto end = pending_.find('\n'); end != std::string::npos; end = pending_.find('\n')) {
+            const auto line = std::string_view(pending_).substr(0, end);
+            const auto name = line.substr(0, line.find(' '));
+            if (name == "goingToScreenSaver" || name == "readyToSuspend") {
+                asleep_ = slept_ = true;
+            } else if (name == "outOfScreenSaver") {
+                asleep_ = false;
+            }
+            pending_.erase(0, end + 1);
+        }
+    }
 }
 
 KindlePowerListener::~KindlePowerListener() {
