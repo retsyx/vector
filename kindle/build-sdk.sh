@@ -6,17 +6,17 @@ project_dir=$(cd "$(dirname "$0")/.." && pwd -P)
 assets="$project_dir/kindle/sdk"
 output="$project_dir/build/kindle-sdk"
 cache=
-install_dir=
+install_dir="$HOME/.local/opt/manga-kindle-sdk"
 
 usage() {
     cat <<'HELP'
 Usage: ./kindle/build-sdk.sh [--output DIR] [--cache DIR] [--install DIR]
 
-Build the Kindle SDK on Apple Silicon macOS, package it, and build Manga Viewer
-using the packaged SDK. The archive and ARM executable go in build/kindle-sdk.
-Downloads are SHA-256 verified and cached under the output directory by default.
-Keep the downloads/ directory for offline rebuilds of the pinned Alpine packages.
---install also extracts the tested SDK into a new directory of your choice.
+Build and package the Kindle SDK on Apple Silicon macOS.
+The SDK installs into $HOME/.local/opt/manga-kindle-sdk by default.
+Use --install DIR to select a different new directory.
+The archive goes in build/kindle-sdk by default. Downloads are SHA-256 verified
+and cached in its downloads/ directory for offline rebuilds.
 HELP
 }
 
@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
         --output|--cache|--install)
-            [[ -n ${2:-} ]] || fail "$1 needs a directory"
+            [[ -n ${2:-} && $2 != --* ]] || fail "$1 needs a directory"
             case "$1" in
                 --output) output=$2 ;;
                 --cache) cache=$2 ;;
@@ -39,27 +39,17 @@ done
 
 [[ $(uname -s) == Darwin && $(uname -m) == arm64 ]] || fail "Run this script in a native Apple Silicon macOS terminal."
 xcode-select -p >/dev/null 2>&1 || fail "Install the Apple Command Line Tools with: xcode-select --install"
-for name in cmake ninja pkg-config; do
-    if ! command -v "$name" >/dev/null; then
-        command -v brew >/dev/null || fail "Install Homebrew, then run: brew install cmake ninja pkgconf"
-        formula=$name
-        [[ "$name" != pkg-config ]] || formula=pkgconf
-        brew install "$formula"
-    fi
-done
 
-if [[ -n "$install_dir" ]]; then
-    [[ ! -e "$install_dir" && ! -L "$install_dir" ]] || fail "Install destination already exists: $install_dir. Choose a new directory or omit --install."
-    mkdir -p "$(dirname "$install_dir")"
-    install_parent=$(cd "$(dirname "$install_dir")" && pwd -P)
-    install_name=$(basename "$install_dir")
-fi
+[[ ! -e "$install_dir" && ! -L "$install_dir" ]] || fail "Install destination already exists: $install_dir. To build with an installed SDK, run ./kindle/build-viewer.sh --sdk \"$install_dir\". To install another SDK, use --install with a new directory."
+mkdir -p "$(dirname "$install_dir")"
+install_parent=$(cd "$(dirname "$install_dir")" && pwd -P)
+install_name=$(basename "$install_dir")
 cache=${cache:-"$output/downloads"}
 mkdir -p "$output" "$cache"
 output=$(cd "$output" && pwd -P)
 cache=$(cd "$cache" && pwd -P)
 archive=manga-viewer-sdk-macos-arm64.tar.gz
-for artifact in "$archive" manga_kindle fbink.log; do
+for artifact in "$archive" fbink.log; do
     [[ ! -d "$output/$artifact" ]] || fail "Expected a file at $output/$artifact"
 done
 work=$(mktemp -d "$output/.sdk-build.XXXXXXXX")
@@ -131,32 +121,13 @@ COPYFILE_DISABLE=1 /usr/bin/tar --no-mac-metadata --no-xattrs \
     --exclude 'manga-kindle-sdk/FBInk-master/Release/static' \
     -czf "$work/$archive" -C "$work" manga-kindle-sdk
 
-# Compile against a newly extracted SDK to exercise the same paths users get.
-unpack="$work/verify"
-if [[ -n "$install_dir" ]]; then
-    install_tmp=$(mktemp -d "$install_parent/.manga-sdk-install.XXXXXXXX")
-    unpack="$install_tmp"
-fi
-mkdir -p "$unpack"
-tar -xf "$work/$archive" -C "$unpack"
-echo "Building Manga Viewer with the packaged SDK"
-cmake -S "$project_dir" -B "$work/viewer" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_TOOLCHAIN_FILE="$unpack/manga-kindle-sdk/kindle-armv7.cmake" \
-    -DCMAKE_CXX_FLAGS=-fPIC -DMANGA_BUILD_KINDLE_VIEWER=ON
-cmake --build "$work/viewer" --target manga_kindle --parallel
-description=$(file -b "$work/viewer/manga_kindle")
-[[ "$description" == *"ELF 32-bit"*"ARM"*"/lib/ld-musl-armhf.so.1"* ]] || fail "Unexpected viewer binary: $description"
+install_tmp=$(mktemp -d "$install_parent/.manga-sdk-install.XXXXXXXX")
+mkdir "$install_tmp/$install_name"
+/usr/bin/tar -xf "$work/$archive" --strip-components 1 -C "$install_tmp/$install_name"
 
 mv -f "$work/fbink.log" "$output/fbink.log"
 mv -f "$work/$archive" "$output/$archive"
-mv -f "$work/viewer/manga_kindle" "$output/manga_kindle"
-if [[ -n "$install_dir" ]]; then
-    if [[ "$install_name" != manga-kindle-sdk ]]; then
-        mv "$install_tmp/manga-kindle-sdk" "$install_tmp/$install_name"
-    fi
-    mv -n "$install_tmp/$install_name" "$install_parent/"
-    [[ ! -d "$install_tmp/$install_name" ]] || fail "Install destination appeared during the build: $install_dir"
-    echo "Installed SDK: $install_parent/$install_name"
-fi
+mv -n "$install_tmp/$install_name" "$install_parent/"
+[[ ! -d "$install_tmp/$install_name" ]] || fail "Install destination appeared during the build: $install_dir"
+echo "Installed SDK: $install_parent/$install_name"
 echo "SDK archive: $output/$archive"
-echo "Kindle viewer: $output/manga_kindle"
