@@ -106,9 +106,9 @@ bool matches(mtp::Device& device, uint32_t object, std::FILE* source)
 void install_file(mtp::Device& device, const Folder& parent, const fs::path& path)
 {
     const std::string name = path.filename();
-    const std::string prefix = "manga-viewer-install--" + name;
-    const std::string staged_name = prefix + ".part";
-    const std::string backup_name = prefix + ".previous";
+    // The Kindle rejects renames that change a file's extension, so the markers lead the name.
+    const std::string staged_name = "manga-viewer-install-part--" + name;
+    const std::string backup_name = "manga-viewer-install-previous--" + name;
     auto current = lookup(parent.entries, name, false);
     auto staged = lookup(parent.entries, staged_name, false);
     auto backup = lookup(parent.entries, backup_name, false);
