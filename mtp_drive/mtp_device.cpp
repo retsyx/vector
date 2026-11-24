@@ -233,9 +233,9 @@ std::vector<Storage> Device::storages()
         const char* label = item->StorageDescription;
         if (!label || !*label)
             label = item->VolumeIdentifier;
-        // PTP storage IDs without a logical part and ROM storage aren't writable.
+        // PTP storage IDs without a logical part and ROM storage (types 1 and 2) aren't writable.
         bool writable = item->AccessCapability == 0 && (item->id & 0xffff) != 0 &&
-                        item->StorageType != 1 && item->StorageType != 3;
+                        item->StorageType != 1 && item->StorageType != 2;
         result.push_back({item->id, label && *label ? label : "Storage " + std::to_string(item->id),
                           known_space(item->MaxCapacity), known_space(item->FreeSpaceInBytes), writable});
     }
