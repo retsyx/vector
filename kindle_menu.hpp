@@ -29,12 +29,13 @@ struct KindlePageScrubber {
     // Zero-based.
     std::size_t page;
     std::size_t page_count;
-    // Later pages lie toward the left, matching the side that advances the page.
+    // Later pages lie toward the left, matching the side that advances the page. The reading direction
+    // toggle shows this setting.
     bool left_advances;
     std::string message;
 };
 
-enum class ScrubberActionKind { none, cancel, go, select };
+enum class ScrubberActionKind { none, cancel, go, select, toggle_direction };
 
 struct ScrubberAction {
     ScrubberActionKind kind = ScrubberActionKind::none;

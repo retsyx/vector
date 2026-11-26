@@ -272,6 +272,8 @@ struct ScrubberLayout {
     Rect page;
     Rect go;
     Rect message;
+    Rect direction_label;
+    Rect direction;
     Rect left;
     Rect track;
     Rect right;
@@ -281,12 +283,14 @@ struct ScrubberLayout {
 
 ScrubberLayout layout_page_scrubber(int width, int panel) {
     const int margin = std::max(8, width / 24);
-    const int row = panel / 3;
+    const int row = panel / 4;
     const int scale = std::clamp(row / 24, 1, 5);
     const int content_width = width - 2 * margin;
     const int button_width = std::min(content_width / 3, 8 * scale * glyph_side);
     const int half_row = row / 2;
-    const int track_y = row + half_row;
+    const int direction_y = row + half_row;
+    const int label_width = content_width - button_width - scale * glyph_side / 2;
+    const int track_y = direction_y + row;
     const int track_height = panel - track_y;
     const int step_width = std::min(track_height, content_width / 4);
     const int track_width = content_width - 2 * step_width;
@@ -297,6 +301,8 @@ ScrubberLayout layout_page_scrubber(int width, int panel) {
         {margin + button_width, 0, content_width - 2 * button_width, row},
         {width - margin - button_width, 0, button_width, row},
         {margin, row, content_width, half_row},
+        {margin, direction_y, label_width, row},
+        {width - margin - button_width, direction_y, button_width, row},
         {margin, track_y, step_width, track_height},
         {margin + step_width, track_y, track_width, track_height},
         {width - margin - step_width, track_y, step_width, track_height},
@@ -698,7 +704,7 @@ void paint_reading_header(std::vector<std::uint8_t>& pixels, int width, int head
 }
 
 int page_scrubber_height(int width, int height) noexcept {
-    return width >= 160 && height >= 240 ? std::clamp(height / 5, 120, 320) : 0;
+    return width >= 160 && height >= 240 ? std::clamp(height * 4 / 15, 160, 424) : 0;
 }
 
 ScrubberAction page_scrubber_action(const KindlePageScrubber& scrubber, int width, int height,
@@ -726,6 +732,9 @@ ScrubberAction page_scrubber_action(const KindlePageScrubber& scrubber, int widt
     }
     if (layout.go.contains(start_x, y)) {
         return {ScrubberActionKind::go, page};
+    }
+    if (layout.direction.contains(start_x, y)) {
+        return {ScrubberActionKind::toggle_direction, page};
     }
     const bool left = layout.left.contains(start_x, y);
     if (!left && !layout.right.contains(start_x, y)) {
@@ -755,6 +764,8 @@ void paint_page_scrubber(std::vector<std::uint8_t>& pixels, int width, int panel
     frame.text(layout.page, std::to_string(page + 1) + " / " + std::to_string(scrubber.page_count), scale + 1,
                ink, true);
     frame.text(layout.message, scrubber.message, std::max(1, scale - 1), muted, true);
+    frame.text(layout.direction_label, "Reading direction", scale, ink);
+    frame.button(button(layout.direction), scrubber.left_advances ? "Left" : "Right", scale + 1, false);
 
     const auto step_padding = std::min(3 * scale, layout.left.width / 8);
     const auto step_scale = std::max(1, std::min(scale, layout.left.width / (2 * glyph_side)));

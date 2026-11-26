@@ -51,10 +51,11 @@ void print_usage(std::ostream& output) {
     output << "Usage: manga_kindle [--page N] [--interactive | --touch] archive.zip\n"
               "       manga_kindle --library DIRECTORY [--settings FILE] [--state FILE]\n"
               "Page numbers start at 1. Interactive commands: n (next), p (previous), q (quit).\n"
-              "In the library, choose a book or open Settings to change tap direction.\n"
+              "In the library, choose a book.\n"
               "Swipe up or down over the library covers to scroll through them.\n"
               "While reading, tap the top edge or swipe down from it to show the reading bar.\n"
-              "Tap the bottom edge or swipe up from it to scrub through the pages.\n";
+              "Tap the bottom edge or swipe up from it to scrub through the pages or change the reading "
+              "direction.\n";
 }
 
 std::size_t parse_page(std::string_view text) {
@@ -839,10 +840,12 @@ bool open_page(manga::Reader& reader, std::size_t page) {
 }
 
 // Previews pages above a scrubber until a page is chosen or the scrubber is cancelled,
-// which returns to the starting page. The reader follows the preview. Returns false when
-// a system event or the idle timeout ends the session.
+// which returns to the starting page. The reader follows the preview. The reading direction
+// toggle updates left_advances when change_direction accepts the new direction. Returns false
+// when a system event or the idle timeout ends the session.
+template<typename OnDirection>
 bool scrub_pages(manga::Reader& reader, int fd, const FBInkConfig& configuration, Touchscreen& touchscreen,
-                 const FBInkState& state, bool left_advances) {
+                 const FBInkState& state, bool& left_advances, OnDirection change_direction) {
     const auto width = static_cast<int>(state.view_width);
     const auto height = static_cast<int>(state.view_height);
     const auto edge = std::clamp(height / 15, 40, 108);
@@ -880,6 +883,20 @@ bool scrub_pages(manga::Reader& reader, int fd, const FBInkConfig& configuration
                 }
             }
             continue;
+        case manga::ScrubberActionKind::toggle_direction:
+            if (change_direction(left_advances ? manga::TapDirection::right_advances
+                                               : manga::TapDirection::left_advances)) {
+                left_advances = !left_advances;
+                scrubber.left_advances = left_advances;
+                scrubber.message.clear();
+            } else {
+                scrubber.message = "Could not save reading direction";
+            }
+            if (touchscreen.power_transition_pending()) {
+                return false;
+            }
+            draw_scrubber_controls(fd, configuration, state, scrubber);
+            continue;
         case manga::ScrubberActionKind::go: return true;
         case manga::ScrubberActionKind::cancel: open_page(reader, original); return true;
         case manga::ScrubberActionKind::none: break;
@@ -894,10 +911,11 @@ bool scrub_pages(manga::Reader& reader, int fd, const FBInkConfig& configuration
     return false;
 }
 
-template<typename OnDisplayed>
+// change_direction returns whether the reading direction chosen in the scrubber took effect.
+template<typename OnDisplayed, typename OnDirection>
 bool read_touch_book(manga::Reader& reader, int fd, FBInkConfig configuration, Touchscreen& touchscreen,
                      manga::TapDirection direction, bool has_library,
-                     OnDisplayed displayed) {
+                     OnDisplayed displayed, OnDirection change_direction) {
     if (touchscreen.power_transition_pending()) {
         return false;
     }
@@ -906,7 +924,7 @@ bool read_touch_book(manga::Reader& reader, int fd, FBInkConfig configuration, T
     configuration.is_flashing = false;
     std::optional<manga::KindleReadingHeader> dropdown;
     std::optional<int> battery;
-    const bool left_advances = direction == manga::TapDirection::left_advances;
+    bool left_advances = direction == manga::TapDirection::left_advances;
     while (const auto touch = touchscreen.wait_for_gesture()) {
         if (touchscreen.power_transition_pending()) {
             return false;
@@ -983,7 +1001,7 @@ bool read_touch_book(manga::Reader& reader, int fd, FBInkConfig configuration, T
         const bool bottom_swipe = !tap && vertical && start_y > height - edge * 0.75 &&
                                   -down >= std::max(24.0, edge / 2.0);
         if ((bottom_tap || bottom_swipe) && manga::page_scrubber_height(width, height) > 0) {
-            if (!scrub_pages(reader, fd, configuration, touchscreen, state, left_advances) ||
+            if (!scrub_pages(reader, fd, configuration, touchscreen, state, left_advances, change_direction) ||
                 touchscreen.power_transition_pending()) {
                 return false;
             }
@@ -1021,7 +1039,7 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
     auto entries = manga::list_library(root);
     auto direction = manga::read_tap_direction(options.settings);
     auto saved = manga::read_reading_position(options.state);
-    enum class LibraryView { picker, settings, delete_picker };
+    enum class LibraryView { picker, delete_picker };
     auto view = LibraryView::picker;
     auto& page = library.page;
     std::optional<std::size_t> pending_deletion;
@@ -1045,6 +1063,17 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
         }
     };
 
+    const auto change_direction = [&](TapDirection chosen) {
+        try {
+            manga::write_tap_direction(options.settings, chosen);
+        } catch (const std::exception& error) {
+            std::cerr << error.what() << '\n';
+            return false;
+        }
+        direction = chosen;
+        return true;
+    };
+
     const auto open_book = [&](const std::filesystem::path& archive) {
         const auto relative = archive.lexically_relative(root);
         const auto first = saved && saved->archive == relative ? saved->page_index : 0;
@@ -1060,9 +1089,9 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             message = "Could not open that archive";
             return true;
         }
-        return read_touch_book(*reader, fd, configuration, touchscreen, direction, true, [&](std::size_t index) {
-            save_position({relative, index, true});
-        });
+        return read_touch_book(
+            *reader, fd, configuration, touchscreen, direction, true,
+            [&](std::size_t index) { save_position({relative, index, true}); }, change_direction);
     };
 
     const auto delete_archive = [&](std::size_t index) {
@@ -1122,12 +1151,6 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             display.details = entries.at(*pending_deletion).path.lexically_relative(root).string();
             display.bottom_left = "Cancel";
             display.bottom_right = "Delete";
-        } else if (view == LibraryView::settings) {
-            display.title = "Settings";
-            display.subtitle = "Tap side that advances the page";
-            display.back = "Library";
-            display.rows = {direction == TapDirection::left_advances ? "[x] Left side" : "[ ] Left side",
-                            direction == TapDirection::right_advances ? "[x] Right side" : "[ ] Right side"};
         } else {
             const bool selecting_deletion = view == LibraryView::delete_picker;
             display.title = selecting_deletion ? "Delete an archive" : "Manga Library";
@@ -1138,7 +1161,6 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             display.back = selecting_deletion ? "Library" : "Exit";
             display.top_right = !selecting_deletion && !entries.empty() ? "Delete" : "";
             display.bottom_left = page > 0 ? "Previous" : "";
-            display.bottom_center = selecting_deletion ? "" : "Settings";
             display.bottom_right = page < last_page ? "Next" : "";
             display.scroll_back = page > 0;
             display.scroll_forward = page < last_page;
@@ -1186,23 +1208,6 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             view = LibraryView::picker;
             continue;
         }
-        if (view == LibraryView::settings) {
-            if (action->kind == MenuActionKind::back) {
-                view = LibraryView::picker;
-            } else if (action->kind == MenuActionKind::row) {
-                const auto chosen = action->row == 0 ? TapDirection::left_advances : TapDirection::right_advances;
-                try {
-                    manga::write_tap_direction(options.settings, chosen);
-                    direction = chosen;
-                    message = "Saved";
-                } catch (const std::exception& error) {
-                    std::cerr << error.what() << '\n';
-                    message = "Could not save settings";
-                }
-            }
-            continue;
-        }
-
         switch (action->kind) {
         case MenuActionKind::back:
             if (view == LibraryView::picker) {
@@ -1215,7 +1220,6 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
         case MenuActionKind::scroll_back: --page; break;
         case MenuActionKind::bottom_right:
         case MenuActionKind::scroll_forward: ++page; break;
-        case MenuActionKind::bottom_center: view = LibraryView::settings; break;
         case MenuActionKind::row:
             if (view == LibraryView::delete_picker) {
                 pending_deletion = start + action->row;
@@ -1223,6 +1227,7 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
                 return false;
             }
             break;
+        case MenuActionKind::bottom_center:
         case MenuActionKind::none: break;
         }
     }
@@ -1254,9 +1259,14 @@ void run(const Options& options) {
         return;
     }
     if (options.touch) {
+        // Without a library there is no settings file, so a new reading direction lasts for this run.
+        auto direction = manga::TapDirection::left_advances;
         run_touch_session(framebuffer.fd, configuration, [&](Touchscreen& touchscreen) {
-            return read_touch_book(*reader, framebuffer.fd, configuration, touchscreen,
-                                   manga::TapDirection::left_advances, false, [](std::size_t) {});
+            return read_touch_book(*reader, framebuffer.fd, configuration, touchscreen, direction, false,
+                                   [](std::size_t) {}, [&](manga::TapDirection chosen) {
+                                       direction = chosen;
+                                       return true;
+                                   });
         });
         return;
     }
