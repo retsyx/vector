@@ -11,20 +11,25 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace manga {
 namespace {
 
+constexpr std::string_view positions_header = "MANGA-VIEWER-3\n";
+// Version 2 records hold the position of a single archive and the saved view.
 constexpr std::string_view position_header = "MANGA-VIEWER-2\n";
 // Version 1 records predate the saved view and always reopened the archive.
 constexpr std::string_view reading_position_header = "MANGA-VIEWER-1\n";
 constexpr std::string_view reading_view = "reading\n";
 constexpr std::string_view library_view = "library\n";
-constexpr std::size_t position_record_limit = 16 * 1024;
+// Only archives in the library keep a saved page, so this leaves room for thousands of them.
+constexpr std::size_t position_record_limit = 1024 * 1024;
 
 class DirectoryHandle {
 public:
@@ -130,6 +135,71 @@ std::optional<std::size_t> consume_number(std::string_view& record) {
     return result;
 }
 
+// Keeping a path as a length-prefixed byte sequence preserves spaces and line breaks. A line break follows it.
+std::optional<std::filesystem::path> consume_path(std::string_view& record) {
+    const auto size = consume_number(record);
+    if (!size || *size >= record.size() || record[*size] != '\n') {
+        return std::nullopt;
+    }
+    const auto path = record.substr(0, *size);
+    if (path.find('\0') != std::string_view::npos) {
+        return std::nullopt;
+    }
+    record.remove_prefix(*size + 1);
+    return std::filesystem::path(path);
+}
+
+void append_path(std::string& record, const std::filesystem::path& path) {
+    const auto& bytes = path.native();
+    if (bytes.find('\0') != std::string::npos) {
+        throw std::invalid_argument("Invalid archive path for the saved positions");
+    }
+    record += std::to_string(bytes.size()) + '\n';
+    record += bytes;
+    record += '\n';
+}
+
+std::optional<ReadingPositions> parse_positions(std::string_view record) {
+    auto reading = consume_path(record);
+    const auto count = consume_number(record);
+    if (!reading || !count) {
+        return std::nullopt;
+    }
+    ReadingPositions positions;
+    positions.reading = std::move(*reading);
+    for (std::size_t index = 0; index < *count; ++index) {
+        const auto page = consume_number(record);
+        auto archive = consume_path(record);
+        if (!page || !archive || archive->empty()) {
+            return std::nullopt;
+        }
+        positions.pages.emplace(std::move(*archive), *page);
+    }
+    if (!record.empty()) {
+        return std::nullopt;
+    }
+    return positions;
+}
+
+// Versions 1 and 2 end with the page and the unterminated path of a single archive.
+std::optional<ReadingPositions> parse_single_position(std::string_view record, bool reading) {
+    const auto page = consume_number(record);
+    const auto path_size = consume_number(record);
+    if (!page || !path_size || record.empty() || record.size() != *path_size ||
+        record.find('\0') != std::string_view::npos) {
+        return std::nullopt;
+    }
+    ReadingPositions positions;
+    const std::filesystem::path archive(record);
+    if (*page != 0) {
+        positions.pages.emplace(archive, *page);
+    }
+    if (reading) {
+        positions.reading = archive;
+    }
+    return positions;
+}
+
 }  // namespace
 
 std::vector<LibraryEntry> list_library(const std::filesystem::path& directory) {
@@ -211,53 +281,70 @@ void write_tap_direction(const std::filesystem::path& settings, TapDirection dir
     write_atomic(settings, direction == TapDirection::right_advances ? "right\n" : "left\n");
 }
 
-std::optional<ReadingPosition> read_reading_position(const std::filesystem::path& state) noexcept {
+ReadingPositions read_reading_positions(const std::filesystem::path& state) noexcept {
     try {
         std::error_code error;
         if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(state, error))) {
-            return std::nullopt;
+            return {};
+        }
+        const auto size = std::filesystem::file_size(state, error);
+        if (error || size > position_record_limit) {
+            return {};
         }
 
         std::ifstream input(state, std::ios::binary);
-        std::array<char, position_record_limit> bytes{};
+        std::string bytes(static_cast<std::size_t>(size), '\0');
         input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-        std::string_view record(bytes.data(), static_cast<std::size_t>(input.gcount()));
-        if (!input.eof() || input.bad()) {
-            return std::nullopt;
-        }
-        bool reading = true;
-        if (consume_prefix(record, position_header)) {
-            reading = consume_prefix(record, reading_view);
-            if (!reading && !consume_prefix(record, library_view)) {
-                return std::nullopt;
-            }
-        } else if (!consume_prefix(record, reading_position_header)) {
-            return std::nullopt;
+        if (static_cast<std::size_t>(input.gcount()) != bytes.size() ||
+            input.peek() != std::ifstream::traits_type::eof()) {
+            return {};
         }
 
-        const auto page = consume_number(record);
-        const auto path_size = consume_number(record);
-        if (!page || !path_size || record.empty() || record.size() != *path_size ||
-            record.find('\0') != std::string_view::npos) {
-            return std::nullopt;
+        std::string_view record(bytes);
+        std::optional<ReadingPositions> positions;
+        if (consume_prefix(record, positions_header)) {
+            positions = parse_positions(record);
+        } else if (consume_prefix(record, position_header)) {
+            const bool reading = consume_prefix(record, reading_view);
+            if (reading || consume_prefix(record, library_view)) {
+                positions = parse_single_position(record, reading);
+            }
+        } else if (consume_prefix(record, reading_position_header)) {
+            positions = parse_single_position(record, true);
         }
-        return ReadingPosition{std::filesystem::path(record), *page, reading};
+        return std::move(positions).value_or(ReadingPositions{});
     } catch (...) {
-        return std::nullopt;
+        return {};
     }
 }
 
-void write_reading_position(const std::filesystem::path& state, const ReadingPosition& position) {
-    const auto& archive = position.archive.native();
-    // Keeping the path as a length-prefixed byte sequence preserves spaces and line breaks.
-    auto record = std::string(position_header) + std::string(position.reading ? reading_view : library_view) +
-                  std::to_string(position.page_index) + '\n' + std::to_string(archive.size()) + '\n';
-    if (archive.empty() || archive.find('\0') != std::string::npos ||
-        archive.size() >= position_record_limit - record.size()) {
-        throw std::invalid_argument("Invalid archive path for the saved position");
+void write_reading_positions(const std::filesystem::path& state, const ReadingPositions& positions) {
+    auto record = std::string(positions_header);
+    append_path(record, positions.reading);
+    record += std::to_string(positions.pages.size()) + '\n';
+    for (const auto& [archive, page] : positions.pages) {
+        if (archive.empty()) {
+            throw std::invalid_argument("Invalid archive path for the saved positions");
+        }
+        record += std::to_string(page) + '\n';
+        append_path(record, archive);
     }
-    record += archive;
+    if (record.size() > position_record_limit) {
+        throw std::length_error("Too many saved reading positions");
+    }
     write_atomic(state, record);
+}
+
+void forget_removed_archives(ReadingPositions& positions, const std::filesystem::path& root,
+                             const std::vector<LibraryEntry>& entries) {
+    decltype(positions.pages) kept;
+    for (const auto& entry : entries) {
+        const auto saved = positions.pages.find(entry.path.lexically_relative(root));
+        if (saved != positions.pages.end()) {
+            kept.insert(positions.pages.extract(saved));
+        }
+    }
+    positions.pages = std::move(kept);
 }
 
 }  // namespace manga

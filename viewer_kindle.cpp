@@ -1038,7 +1038,7 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
     const auto root = std::filesystem::canonical(options.library);
     auto entries = manga::list_library(root);
     auto direction = manga::read_tap_direction(options.settings);
-    auto saved = manga::read_reading_position(options.state);
+    auto saved = manga::read_reading_positions(options.state);
     enum class LibraryView { picker, delete_picker };
     auto view = LibraryView::picker;
     auto& page = library.page;
@@ -1049,18 +1049,20 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
     constexpr auto per_page = manga::KindleMenu::covers_per_page;
     constexpr auto max_cached_thumbnails = 3 * per_page;
 
-    const auto save_position = [&](manga::ReadingPosition position) {
-        if (saved && saved->archive == position.archive && saved->page_index == position.page_index &&
-            saved->reading == position.reading) {
-            return;
+    // Returns false when the positions could not be saved.
+    const auto save_positions = [&](manga::ReadingPositions positions) {
+        if (positions.pages == saved.pages && positions.reading == saved.reading) {
+            return true;
         }
         try {
-            manga::write_reading_position(options.state, position);
-            saved = std::move(position);
+            manga::write_reading_positions(options.state, positions);
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';
             message = "Could not save reading position";
+            return false;
         }
+        saved = std::move(positions);
+        return true;
     };
 
     const auto change_direction = [&](TapDirection chosen) {
@@ -1076,7 +1078,8 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
 
     const auto open_book = [&](const std::filesystem::path& archive) {
         const auto relative = archive.lexically_relative(root);
-        const auto first = saved && saved->archive == relative ? saved->page_index : 0;
+        const auto found = saved.pages.find(relative);
+        const auto first = found != saved.pages.end() ? found->second : 0;
         std::unique_ptr<manga::Reader> reader;
         try {
             try {
@@ -1089,9 +1092,18 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             message = "Could not open that archive";
             return true;
         }
-        return read_touch_book(
-            *reader, fd, configuration, touchscreen, direction, true,
-            [&](std::size_t index) { save_position({relative, index, true}); }, change_direction);
+        const auto displayed = [&](std::size_t index) {
+            auto positions = saved;
+            if (index == 0) {
+                positions.pages.erase(relative);
+            } else {
+                positions.pages[relative] = index;
+            }
+            positions.reading = relative;
+            save_positions(std::move(positions));
+        };
+        return read_touch_book(*reader, fd, configuration, touchscreen, direction, true, displayed,
+                               change_direction);
     };
 
     const auto delete_archive = [&](std::size_t index) {
@@ -1108,20 +1120,26 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
         entries.erase(entry);
         message = "Archive deleted";
 
-        if (saved && saved->archive == relative) {
-            saved.reset();
-            const auto position = manga::read_reading_position(options.state);
-            if (position && position->archive == relative && unlink(options.state.c_str()) < 0 && errno != ENOENT) {
-                std::cerr << "Could not clear saved reading position: "
-                          << std::error_code(errno, std::generic_category()).message() << '\n';
-                message = "Deleted. Could not clear saved position";
-            }
+        auto positions = saved;
+        positions.pages.erase(relative);
+        if (positions.reading == relative) {
+            positions.reading.clear();
+        }
+        if (!save_positions(std::move(positions))) {
+            message = "Deleted. Could not clear saved position";
         }
     };
 
-    if (saved && saved->reading && !touchscreen.power_transition_pending()) {
+    {
+        // Archives can also leave the library over USB, so forget the ones that are gone whenever it opens.
+        auto positions = saved;
+        manga::forget_removed_archives(positions, root, entries);
+        save_positions(std::move(positions));
+    }
+
+    if (!saved.reading.empty() && !touchscreen.power_transition_pending()) {
         const auto match = std::find_if(entries.begin(), entries.end(), [&](const manga::LibraryEntry& entry) {
-            return entry.path.lexically_relative(root) == saved->archive;
+            return entry.path.lexically_relative(root) == saved.reading;
         });
         if (match != entries.end()) {
             if (!open_book(match->path)) {
@@ -1133,9 +1151,11 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
     }
 
     while (!touchscreen.power_transition_pending()) {
-        if (saved && saved->reading) {
+        if (!saved.reading.empty()) {
             // Reopen the library rather than the archive after the screensaver or the next launch.
-            save_position({saved->archive, saved->page_index, false});
+            auto positions = saved;
+            positions.reading.clear();
+            save_positions(std::move(positions));
         }
         const auto state = display_state(fd, configuration);
         const manga::KindleMenu menu(state);
