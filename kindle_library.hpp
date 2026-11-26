@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <vector>
@@ -33,5 +34,27 @@ void write_reading_positions(const std::filesystem::path& state, const ReadingPo
 // Forgets archives that are no longer among the entries of the library at root.
 void forget_removed_archives(ReadingPositions& positions, const std::filesystem::path& root,
                              const std::vector<LibraryEntry>& entries);
+
+// Cover thumbnails kept between launches, so the library can show them without decoding the archives again.
+// Each cover file records the archive's path relative to the library, its size and modification time, and the
+// thumbnail size, so a changed archive or screen reads as having no cover. Archives are full paths in the library.
+class CoverCache {
+public:
+    CoverCache(std::filesystem::path directory, std::filesystem::path root);
+
+    // Returns no pixels when no current cover of this size is saved.
+    std::vector<std::uint8_t> read(const std::filesystem::path& archive, int width, int height) const noexcept;
+    void write(const std::filesystem::path& archive, int width, int height,
+               const std::vector<std::uint8_t>& pixels) const;
+    void remove(const std::filesystem::path& archive) const noexcept;
+    // Deletes the covers of archives that are no longer among the entries.
+    void forget_removed_archives(const std::vector<LibraryEntry>& entries) const noexcept;
+
+private:
+    std::filesystem::path file(const std::filesystem::path& archive) const;
+
+    std::filesystem::path directory_;
+    std::filesystem::path root_;
+};
 
 }  // namespace manga

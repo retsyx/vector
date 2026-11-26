@@ -42,6 +42,7 @@ struct Options {
     std::filesystem::path library;
     std::filesystem::path settings;
     std::filesystem::path state;
+    std::filesystem::path covers;
     std::size_t first_page = 0;
     bool interactive = false;
     bool touch = false;
@@ -119,6 +120,8 @@ Options parse_options(int argc, char** argv) {
         if (options.settings.lexically_normal() == options.state.lexically_normal()) {
             throw std::invalid_argument("Use different files for settings and reading position");
         }
+        // Hidden, so the library leaves it out when the settings are inside the library.
+        options.covers = options.settings.parent_path() / ".manga-viewer-covers";
     } else if (!options.settings.empty() || !options.state.empty()) {
         throw std::invalid_argument("--settings and --state require --library");
     } else if (options.archive.empty()) {
@@ -1038,6 +1041,7 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
 
     const auto root = std::filesystem::canonical(options.library);
     auto entries = manga::list_library(root);
+    const manga::CoverCache covers(options.covers, root);
     auto direction = manga::read_tap_direction(options.settings);
     auto saved = manga::read_reading_positions(options.state);
     enum class LibraryView { picker, delete_picker };
@@ -1118,6 +1122,7 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             return;
         }
         thumbnails.erase(entry->path);
+        covers.remove(entry->path);
         entries.erase(entry);
         message = "Archive deleted";
 
@@ -1136,6 +1141,7 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
         auto positions = saved;
         manga::forget_removed_archives(positions, root, entries);
         save_positions(std::move(positions));
+        covers.forget_removed_archives(entries);
     }
 
     if (!saved.reading.empty() && !touchscreen.power_transition_pending()) {
@@ -1193,7 +1199,17 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
                 thumbnails.clear();
             }
             for (std::size_t index = start; index < std::min(start + per_page, entries.size()); ++index) {
-                const auto thumbnail = thumbnails.find(entries[index].path);
+                const auto& archive = entries[index].path;
+                auto thumbnail = thumbnails.find(archive);
+                if (thumbnail == thumbnails.end()) {
+                    // A cover saved by an earlier launch reads fast enough to show with the page.
+                    if (auto pixels = covers.read(archive, size.first, size.second); !pixels.empty()) {
+                        if (thumbnails.size() == max_cached_thumbnails) {
+                            thumbnails.clear();
+                        }
+                        thumbnail = thumbnails.emplace(archive, std::move(pixels)).first;
+                    }
+                }
                 if (thumbnail == thumbnails.end()) {
                     loading.push_back(display.thumbnails.size());
                     display.thumbnails.emplace_back();
@@ -1228,6 +1244,12 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
             if (!pixels.empty()) {
                 display.thumbnails[tile] = pixels;
                 menu.draw_cover(fd, configuration, display, tile);
+                try {
+                    covers.write(archive, thumbnail_size.first, thumbnail_size.second, pixels);
+                } catch (const std::exception& error) {
+                    std::cerr << "Could not save the cover of " << archive.filename().string() << ": "
+                              << error.what() << '\n';
+                }
             }
             if (thumbnails.size() == max_cached_thumbnails) {
                 thumbnails.clear();

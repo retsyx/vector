@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -30,6 +31,13 @@ constexpr std::string_view reading_view = "reading\n";
 constexpr std::string_view library_view = "library\n";
 // Only archives in the library keep a saved page, so this leaves room for thousands of them.
 constexpr std::size_t position_record_limit = 1024 * 1024;
+constexpr std::string_view cover_header = "MANGA-VIEWER-COVER-1\n";
+constexpr std::string_view cover_extension = ".cover";
+constexpr std::string_view hex_digits = "0123456789abcdef";
+// Cover file names start with a 64-bit hash of the archive's path in hexadecimal.
+constexpr std::size_t cover_name_digits = 16;
+// Room for the archive's path and the numbers that precede the pixels of a cover.
+constexpr std::size_t cover_header_limit = 16 * 1024;
 
 class DirectoryHandle {
 public:
@@ -120,12 +128,13 @@ bool consume_prefix(std::string_view& record, std::string_view prefix) {
     return true;
 }
 
-std::optional<std::size_t> consume_number(std::string_view& record) {
+template <typename Number = std::size_t>
+std::optional<Number> consume_number(std::string_view& record) {
     const auto separator = record.find('\n');
     if (separator == std::string_view::npos) {
         return std::nullopt;
     }
-    std::size_t result;
+    Number result;
     const auto last = record.data() + separator;
     const auto parsed = std::from_chars(record.data(), last, result);
     if (parsed.ec != std::errc{} || parsed.ptr != last) {
@@ -198,6 +207,38 @@ std::optional<ReadingPositions> parse_single_position(std::string_view record, b
         positions.reading = archive;
     }
     return positions;
+}
+
+// 64-bit FNV-1a.
+std::uint64_t hash_bytes(std::string_view bytes) {
+    std::uint64_t hash = 14695981039346656037u;
+    for (const char byte : bytes) {
+        hash = (hash ^ static_cast<unsigned char>(byte)) * 1099511628211u;
+    }
+    return hash;
+}
+
+struct ArchiveStamp {
+    std::uint64_t size;
+    // Nanoseconds since the epoch.
+    std::uint64_t modified;
+};
+
+ArchiveStamp archive_stamp(const std::filesystem::path& archive) {
+    struct stat status {};
+    if (stat(archive.c_str(), &status) < 0) {
+        throw std::system_error(errno, std::generic_category(), "Inspect archive " + archive.native());
+    }
+    return {static_cast<std::uint64_t>(status.st_size),
+            static_cast<std::uint64_t>(status.st_mtim.tv_sec) * 1000000000u +
+                static_cast<std::uint64_t>(status.st_mtim.tv_nsec)};
+}
+
+// Matches cover files and the temporary files of interrupted saves.
+bool cover_file_name(std::string_view name) {
+    return name.size() >= cover_name_digits + cover_extension.size() &&
+           name.find_first_not_of(hex_digits) >= cover_name_digits &&
+           name.substr(cover_name_digits, cover_extension.size()) == cover_extension;
 }
 
 }  // namespace
@@ -345,6 +386,116 @@ void forget_removed_archives(ReadingPositions& positions, const std::filesystem:
         }
     }
     positions.pages = std::move(kept);
+}
+
+CoverCache::CoverCache(std::filesystem::path directory, std::filesystem::path root)
+    : directory_(std::move(directory)), root_(std::move(root)) {}
+
+std::filesystem::path CoverCache::file(const std::filesystem::path& archive) const {
+    const auto hash = hash_bytes(archive.lexically_relative(root_).native());
+    std::string name(cover_name_digits, '0');
+    for (std::size_t index = 0; index < cover_name_digits; ++index) {
+        name[index] = hex_digits[(hash >> (4 * (cover_name_digits - 1 - index))) & 0xF];
+    }
+    name += cover_extension;
+    return directory_ / name;
+}
+
+std::vector<std::uint8_t> CoverCache::read(const std::filesystem::path& archive, int width,
+                                           int height) const noexcept {
+    try {
+        if (width <= 0 || height <= 0) {
+            return {};
+        }
+        const auto stamp = archive_stamp(archive);
+        const auto pixel_count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        const auto path = file(archive);
+        std::error_code error;
+        const auto size = std::filesystem::file_size(path, error);
+        if (error || size > pixel_count + cover_header_limit) {
+            return {};
+        }
+        std::ifstream input(path, std::ios::binary);
+        std::string bytes(static_cast<std::size_t>(size), '\0');
+        input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        if (static_cast<std::size_t>(input.gcount()) != bytes.size()) {
+            return {};
+        }
+
+        std::string_view record(bytes);
+        if (!consume_prefix(record, cover_header)) {
+            return {};
+        }
+        const auto relative = consume_path(record);
+        const auto archive_size = consume_number<std::uint64_t>(record);
+        const auto modified = consume_number<std::uint64_t>(record);
+        const auto cover_width = consume_number(record);
+        const auto cover_height = consume_number(record);
+        const auto checksum = consume_number<std::uint64_t>(record);
+        if (relative != archive.lexically_relative(root_) || archive_size != stamp.size ||
+            modified != stamp.modified || cover_width != static_cast<std::size_t>(width) ||
+            cover_height != static_cast<std::size_t>(height) || !checksum || record.size() != pixel_count ||
+            hash_bytes(record) != *checksum) {
+            return {};
+        }
+        const auto* pixels = reinterpret_cast<const std::uint8_t*>(record.data());
+        return {pixels, pixels + record.size()};
+    } catch (...) {
+        return {};
+    }
+}
+
+void CoverCache::write(const std::filesystem::path& archive, int width, int height,
+                       const std::vector<std::uint8_t>& pixels) const {
+    if (width <= 0 || height <= 0 ||
+        pixels.size() != static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) {
+        throw std::invalid_argument("The cover does not match its size");
+    }
+    const auto stamp = archive_stamp(archive);
+    const std::string_view bytes(reinterpret_cast<const char*>(pixels.data()), pixels.size());
+    auto record = std::string(cover_header);
+    append_path(record, archive.lexically_relative(root_));
+    for (const std::uint64_t number : {stamp.size, stamp.modified, static_cast<std::uint64_t>(width),
+                                       static_cast<std::uint64_t>(height), hash_bytes(bytes)}) {
+        record += std::to_string(number) + '\n';
+    }
+    record += bytes;
+    if (mkdir(directory_.c_str(), 0755) < 0 && errno != EEXIST) {
+        throw std::system_error(errno, std::generic_category(), "Create cover directory " + directory_.native());
+    }
+    write_atomic(file(archive), record);
+}
+
+void CoverCache::remove(const std::filesystem::path& archive) const noexcept {
+    try {
+        std::error_code error;
+        std::filesystem::remove(file(archive), error);
+    } catch (...) {
+        // A cover left behind goes when the library next opens without its archive.
+    }
+}
+
+void CoverCache::forget_removed_archives(const std::vector<LibraryEntry>& entries) const noexcept {
+    try {
+        std::set<std::string> current;
+        for (const auto& entry : entries) {
+            current.insert(file(entry.path).filename().native());
+        }
+        std::vector<std::filesystem::path> removed;
+        std::error_code error;
+        for (std::filesystem::directory_iterator cover(directory_, error), end; !error && cover != end;
+             cover.increment(error)) {
+            const auto name = cover->path().filename().native();
+            if (cover_file_name(name) && current.count(name) == 0) {
+                removed.push_back(cover->path());
+            }
+        }
+        for (const auto& path : removed) {
+            std::filesystem::remove(path, error);
+        }
+    } catch (...) {
+        // Covers that could not be deleted are tried again when the library next opens.
+    }
 }
 
 }  // namespace manga
