@@ -54,7 +54,7 @@ void print_usage(std::ostream& output) {
               "In the library, choose a book or open Settings to change tap direction.\n"
               "Swipe up or down over the library covers to scroll through them.\n"
               "While reading, tap the top edge or swipe down from it to show the reading bar.\n"
-              "Swipe up from the bottom edge to scrub through the pages.\n";
+              "Tap the bottom edge or swipe up from it to scrub through the pages.\n";
 }
 
 std::size_t parse_page(std::string_view text) {
@@ -979,9 +979,10 @@ bool read_touch_book(manga::Reader& reader, int fd, FBInkConfig configuration, T
             draw_reading_dropdown(fd, configuration, reader, state, header, dropdown);
             continue;
         }
+        const bool bottom_tap = tap && point.y * height >= height - edge;
         const bool bottom_swipe = !tap && vertical && start_y > height - edge * 0.75 &&
                                   -down >= std::max(24.0, edge / 2.0);
-        if (bottom_swipe && manga::page_scrubber_height(width, height) > 0) {
+        if ((bottom_tap || bottom_swipe) && manga::page_scrubber_height(width, height) > 0) {
             if (!scrub_pages(reader, fd, configuration, touchscreen, state, left_advances) ||
                 touchscreen.power_transition_pending()) {
                 return false;
