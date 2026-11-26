@@ -43,3 +43,19 @@ If you built with a custom SDK, pass the same path. For example:
 ```sh
 ./kindle/install-viewer.sh --sdk "$HOME/SDKs/manga-kindle"
 ```
+
+## Open the Library instead of Home
+
+After a reboot or when you leave an app such as Vector, the Kindle starts its home app (`com.lab126.KPPMainApp`) without a view, which opens the Home tab. A `defaultContext` for the app in the app registry makes the Kindle open the Library tab instead. Run this as root on the Kindle, for example with [Vector Shell](SHELL.md):
+
+```sh
+sqlite3 /var/local/appreg.db "insert or replace into properties (handlerId, name, value) values ('com.lab126.KPPMainApp', 'defaultContext', 'view=KPP_LIBRARY');"
+```
+
+The change takes effect immediately and survives reboots. A firmware update or factory reset may undo it. Books still return to the tab they were opened from, and the Home tab still opens Home. Tested on firmware 5.17.1.0.4.
+
+To undo the change:
+
+```sh
+sqlite3 /var/local/appreg.db "delete from properties where handlerId = 'com.lab126.KPPMainApp' and name = 'defaultContext';"
+```
