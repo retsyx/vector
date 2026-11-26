@@ -77,6 +77,8 @@ public:
     std::size_t rows_per_page() const;
     std::pair<int, int> thumbnail_size() const;
     void draw(int fd, const FBInkConfig& configuration, const KindleMenuPage& page) const;
+    // Redraws one cover tile of a page that draw() has shown, such as once its thumbnail is ready.
+    void draw_cover(int fd, const FBInkConfig& configuration, const KindleMenuPage& page, std::size_t index) const;
     MenuAction hit(const KindleMenuPage& page, double x, double y) const;
     MenuAction swipe(const KindleMenuPage& page, double start_x, double start_y, double end_x, double end_y) const;
 

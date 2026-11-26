@@ -805,10 +805,11 @@ void run_touch_session(int fd, const FBInkConfig& configuration, View view) {
     }
 }
 
+// Without wait, reads only the touches that have already arrived.
 std::optional<manga::MenuAction> wait_for_menu_action(Touchscreen& touchscreen, const FBInkState& state,
                                                     const manga::KindleMenu& menu,
-                                                    const manga::KindleMenuPage& display) {
-    while (const auto touch = touchscreen.wait_for_gesture()) {
+                                                    const manga::KindleMenuPage& display, bool wait = true) {
+    while (const auto touch = wait ? touchscreen.wait_for_gesture() : touchscreen.wait_for_gesture(0)) {
         const auto gesture = screen_gesture(*touch, state);
         const auto action = gesture.is_tap()
                                 ? menu.hit(display, gesture.end.x, gesture.end.y)
@@ -1165,6 +1166,8 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
 
         manga::KindleMenuPage display;
         display.message = message;
+        // Tiles whose covers are not loaded yet. They show placeholders until the covers decode.
+        std::vector<std::size_t> loading;
         if (pending_deletion) {
             display.title = "Delete archive?";
             display.subtitle = "Remove this file from your Kindle?";
@@ -1190,19 +1193,13 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
                 thumbnails.clear();
             }
             for (std::size_t index = start; index < std::min(start + per_page, entries.size()); ++index) {
-                const auto& archive = entries[index].path;
-                auto thumbnail = thumbnails.find(archive);
+                const auto thumbnail = thumbnails.find(entries[index].path);
                 if (thumbnail == thumbnails.end()) {
-                    if (touchscreen.power_transition_pending()) {
-                        return false;
-                    }
-                    if (thumbnails.size() == max_cached_thumbnails) {
-                        thumbnails.clear();
-                    }
-                    auto pixels = archive_thumbnail(archive, size.first, size.second);
-                    thumbnail = thumbnails.emplace(archive, std::move(pixels)).first;
+                    loading.push_back(display.thumbnails.size());
+                    display.thumbnails.emplace_back();
+                } else {
+                    display.thumbnails.push_back(thumbnail->second);
                 }
-                display.thumbnails.push_back(thumbnail->second);
             }
             if (entries.empty() && display.message.empty()) {
                 display.message = "No ZIP or CBZ files found";
@@ -1214,7 +1211,32 @@ bool browse_library(const Options& options, int fd, FBInkConfig configuration, T
         }
         menu.draw(fd, configuration, display);
         configuration.is_flashing = false;
-        const auto action = wait_for_menu_action(touchscreen, state, menu, display);
+
+        // Decode the missing covers once the page is showing, one at a time, and stop as soon as
+        // a touch chooses an action.
+        std::optional<manga::MenuAction> action;
+        for (const auto tile : loading) {
+            action = wait_for_menu_action(touchscreen, state, menu, display, false);
+            if (action || touchscreen.power_transition_pending()) {
+                break;
+            }
+            const auto& archive = entries[start + tile].path;
+            auto pixels = archive_thumbnail(archive, thumbnail_size.first, thumbnail_size.second);
+            if (touchscreen.power_transition_pending()) {
+                return false;
+            }
+            if (!pixels.empty()) {
+                display.thumbnails[tile] = pixels;
+                menu.draw_cover(fd, configuration, display, tile);
+            }
+            if (thumbnails.size() == max_cached_thumbnails) {
+                thumbnails.clear();
+            }
+            thumbnails.emplace(archive, std::move(pixels));
+        }
+        if (!action) {
+            action = wait_for_menu_action(touchscreen, state, menu, display);
+        }
         if (!action || touchscreen.power_transition_pending()) {
             return false;
         }

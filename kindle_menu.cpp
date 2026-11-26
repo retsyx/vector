@@ -476,7 +476,7 @@ public:
         fill({line.x, rect.y + rect.height / 2 + weight, line.width, weight}, border);
     }
 
-    void show(int fd, const FBInkConfig& configuration) const {
+    void show(int fd, const FBInkConfig& configuration, int x = 0, int y = 0) const {
         FBInkConfig render = configuration;
         render.col = render.row = render.hoffset = render.voffset = 0;
         render.halign = render.valign = NONE;
@@ -485,7 +485,7 @@ public:
         render.no_refresh = false;
         render.scaled_width = render.scaled_height = 0;
         const int result = fbink_print_raw_data(fd, pixels_.data(), width_, height_, pixels_.size(),
-                                                0, 0, &render);
+                                                static_cast<short>(x), static_cast<short>(y), &render);
         if (result < 0) {
             throw std::runtime_error("Draw Kindle menu (FBInk error " + std::to_string(result) + ")");
         }
@@ -567,6 +567,25 @@ void KindleMenu::draw(int fd, const FBInkConfig& configuration, const KindleMenu
     frame.button(layout.footer[1], page.bottom_center, layout.scale, true);
     frame.button(layout.footer[2], page.bottom_right, layout.scale, false);
     frame.show(fd, configuration);
+}
+
+void KindleMenu::draw_cover(int fd, const FBInkConfig& configuration, const KindleMenuPage& page,
+                            std::size_t index) const {
+    const auto tile = cover_grid(layout_for(width_, height_)).cover(index);
+    if (index >= std::min(page.thumbnails.size(), covers_per_page) || tile.width <= 0 || tile.height <= 0) {
+        return;
+    }
+    // Include the outline that draw() puts around a cover.
+    const auto area = tile.inset(-1);
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(area.width) * static_cast<std::size_t>(area.height),
+                                     paper);
+    Frame frame(area.width, area.height, pixels);
+    const auto& thumbnail = page.thumbnails[index];
+    if (!thumbnail.empty()) {
+        frame.fill({0, 0, area.width, area.height}, border);
+    }
+    frame.thumbnail({1, 1, tile.width, tile.height}, &thumbnail);
+    frame.show(fd, configuration, area.x, area.y);
 }
 
 MenuAction KindleMenu::hit(const KindleMenuPage& page, double x, double y) const {
