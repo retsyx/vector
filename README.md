@@ -1,6 +1,10 @@
 # Vector
 The Kindle Manga Vector
 
+Read manga encoded in HEIF/JPEG/PNG and packaged in ZIP archives or CBZ files.
+
+Use the included [uploader](uploader/README.md) utility to upload the ZIP/CBZ files directly without any additional conversions.
+
 ## Prerequisites
 
 In the vector directory run:
