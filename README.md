@@ -1,7 +1,7 @@
 # Vector
-The Kindle Manga Vector
+The Kindle Manga and Comics Reader
 
-Read manga encoded in HEIF/JPEG/PNG and packaged in ZIP archives or CBZ files.
+Read manga and comics encoded in HEIF/JPEG/PNG and packaged in [CBZ](https://en.wikipedia.org/wiki/Comic_book_archive) formatted ZIP archives.
 
 Use the included [uploader](uploader/README.md) utility to upload the ZIP/CBZ files directly without any additional conversions.
 
@@ -13,6 +13,8 @@ Use the included [uploader](uploader/README.md) utility to upload the ZIP/CBZ fi
 </p>
 
 ## Prerequisites
+
+Liberate your Kindle with [SpiderCat](https://kindlemodding.org/jailbreaking/SpiderCat/).
 
 In the vector directory run:
 
