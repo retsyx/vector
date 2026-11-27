@@ -5,6 +5,13 @@ Read manga encoded in HEIF/JPEG/PNG and packaged in ZIP archives or CBZ files.
 
 Use the included [uploader](uploader/README.md) utility to upload the ZIP/CBZ files directly without any additional conversions.
 
+<p>
+  <img src="screenshots/images/library.png" width="24%" alt="The manga library">
+  <img src="screenshots/images/reading.png" width="24%" alt="A manga page">
+  <img src="screenshots/images/reading-bar.png" width="24%" alt="The reading bar">
+  <img src="screenshots/images/scrubber.png" width="24%" alt="The page scrubber">
+</p>
+
 ## Prerequisites
 
 In the vector directory run:
@@ -63,3 +70,15 @@ To undo the change:
 ```sh
 sqlite3 /var/local/appreg.db "delete from properties where handlerId = 'com.lab126.KPPMainApp' and name = 'defaultContext';"
 ```
+
+## Screenshots
+
+The screenshots show sample manga. To render them again after changing the viewer, run in the vector directory:
+
+```sh
+brew install librsvg libheif libzip
+
+./screenshots/build-screenshots.sh
+```
+
+Use the `--sdk` option if you installed the SDK in a custom path.
